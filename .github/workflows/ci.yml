@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # headless software rendering (the chamber-camera depth and the SO-101 previews render offscreen)
+  MUJOCO_GL: osmesa
+  PYOPENGL_PLATFORM: osmesa
+  SO101_REF: cda5236f98383f6fbaa4820c6b18dba892cd087f   # mujoco_menagerie commit, see THIRD_PARTY_NOTICES.md
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: System libraries (OSMesa)
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends libosmesa6 libgl1
+
+      - name: Python packages
+        run: pip install -r requirements-dev.txt
+
+      - name: SO-101 model cache
+        id: so101
+        uses: actions/cache@v4
+        with:
+          path: real/assets/so101
+          key: so101-${{ env.SO101_REF }}
+
+      - name: Fetch SO-101 model (pinned)
+        if: steps.so101.outputs.cache-hit != 'true'
+        run: |
+          tmp=$(mktemp -d)
+          git -C "$tmp" init -q
+          git -C "$tmp" remote add origin https://github.com/google-deepmind/mujoco_menagerie.git
+          git -C "$tmp" sparse-checkout set robotstudio_so101
+          git -C "$tmp" fetch -q --depth 1 --filter=blob:none origin "$SO101_REF"
+          git -C "$tmp" checkout -q FETCH_HEAD
+          mkdir -p real/assets
+          cp -R "$tmp/robotstudio_so101" real/assets/so101
+          echo "mujoco_menagerie robotstudio_so101 @ $SO101_REF" > real/assets/so101/SOURCE.txt
+
+      - name: Unit tests (fleet, slicer, printer backends, SO-101 kinematics)
+        run: python -m pytest -q
+
+      - name: Build the farm scene (vendored YAM + generated lab textures)
+        run: python -m farm.scene
+
+      - name: Smoke - pick one part into a bin
+        env: { PYTHONPATH: . }
+        run: python scripts/test_drop.py gear | tee drop.log && grep -q "gear placed" drop.log
+
+      - name: Smoke - open and close a door
+        env: { PYTHONPATH: . }
+        run: python scripts/test_door.py 4 | tee door.log && grep -q "CLOSE ok=True" door.log
+
+      - name: Smoke - camera blob + rake into the reject tray
+        env: { PYTHONPATH: . }
+        run: python scripts/test_rake.py cube 150 80 | tee rake.log && grep -q "in tray True" rake.log

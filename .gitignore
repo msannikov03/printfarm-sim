@@ -1,0 +1,41 @@
+# python / tooling
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# OS / MuJoCo litter
+.DS_Store
+MUJOCO_LOG.TXT
+
+# generated: compiled scene, run outputs, videos and frames
+/build/
+/runs/*
+# ...except the two small measured inputs the scripts read by default (regenerate with
+# `python -m plan.bedmap` and `python scripts/make_timings.py runs/eval`)
+!/runs/bedmap.json
+!/runs/timings.json
+!/runs/station_times.json
+*.mp4
+*.png
+*.gif
+# README / docs media is tracked
+!/docs/media/*
+
+# assets: only the vendored YAM model is tracked (MIT, mujoco_menagerie i2rt_yam @ f054586, see THIRD_PARTY_NOTICES.md)
+/assets/*
+!/assets/yam/
+/assets/yam/*
+!/assets/yam/yam.xml
+!/assets/yam/LICENSE
+!/assets/yam/README.md
+!/assets/yam/CHANGELOG.md
+!/assets/yam/assets/
+/assets/yam/assets/*
+!/assets/yam/assets/model2*.stl
+# assets/lab/ textures are generated on demand by farm/lab.py
+# the SO-101 model (Apache-2.0) is downloaded by real/fetch_assets.sh
+real/assets/

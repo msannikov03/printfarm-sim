@@ -1,0 +1,5 @@
+# Line endings
+* text=auto eol=lf
+*.stl binary
+*.png binary
+*.gif binary

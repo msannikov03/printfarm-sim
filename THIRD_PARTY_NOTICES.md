@@ -1,0 +1,30 @@
+# Third-party notices
+
+The code in this repository is MIT-licensed (see [LICENSE](LICENSE)). It bundles or downloads the
+robot models below, which keep their own licenses. Both come from
+[MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie), unmodified.
+
+| Model | Where it lives here | Upstream path @ commit | License |
+|---|---|---|---|
+| I2RT **YAM** arm (`linear_3507` gripper) | `assets/yam/` (vendored: `yam.xml`, `assets/model2*.stl`, `LICENSE`, `README.md`, `CHANGELOG.md`) | `i2rt_yam/` @ [`f054586`](https://github.com/google-deepmind/mujoco_menagerie/tree/f054586a8e90465d49ee5be15335c4a0c7f57caf/i2rt_yam) (2026-10-05) | MIT, Copyright (c) 2025 i2rt robotics: [`assets/yam/LICENSE`](assets/yam/LICENSE) |
+| RobotStudio **SO-101** arm | `real/assets/so101/` (not committed; `real/fetch_assets.sh` downloads it) | `robotstudio_so101/` @ [`cda5236`](https://github.com/google-deepmind/mujoco_menagerie/tree/cda5236f98383f6fbaa4820c6b18dba892cd087f/robotstudio_so101) (2026-10-19) | Apache-2.0: `real/assets/so101/LICENSE` after fetching |
+
+The vendored YAM files are byte-identical to upstream at that commit; their git blob hashes were checked
+against the GitHub contents API. The scene builder (`farm/scene.py`) reads `yam.xml` and the meshes at runtime
+and adds the rail, the carriage, the printers and everything else around them. The upstream files themselves
+are not edited.
+
+## Python dependencies
+
+Installed from PyPI (see `requirements.txt`), not redistributed here:
+MuJoCo (Apache-2.0), NumPy (BSD-3-Clause), SciPy (BSD-3-Clause), Matplotlib (PSF-based Matplotlib license),
+OpenCV (Apache-2.0), imageio (BSD-2-Clause) with imageio-ffmpeg (BSD-2-Clause; downloads an FFmpeg binary
+under LGPL/GPL), Pillow (MIT-CMU), websockets (BSD-3-Clause), pySerial (BSD-3-Clause), pytest (MIT).
+
+## Protocol references
+
+`real/printer/creality_ws.py` speaks the stock Creality OS websocket protocol. Its message keys and state table
+were taken from the Home Assistant integration
+[ha_creality_ws](https://github.com/3dg1luk43/ha_creality_ws) (AGPL-3.0), used as a protocol reference only.
+The implementation is our own: compared line by line with that project's `ws_client.py` and `utils.py`
+@ `a8e5491`, the two share no run longer than one generic line (`import logging`, `return "idle"`).

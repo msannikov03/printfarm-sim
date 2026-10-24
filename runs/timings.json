@@ -1,0 +1,27 @@
+{
+ "source": "MuJoCo batch runs/two_rows/eval_both (40 plates, 200 parts)",
+ "rail_speed_mps": 0.4,
+ "door_open_s": 23.238999999997777,
+ "door_close_s": 21.08800000001026,
+ "scan_s": 2.0,
+ "purge_tab_s": 17.946666666666662,
+ "pick_place_s_mean": 18.1660625,
+ "pick_place_s_std": 3.926702194092869,
+ "bed_check_s": 2.0,
+ "station_handoff_s": 6.0,
+ "retry_s": 8.0,
+ "p_success_first_try": 0.995,
+ "p_intervention_per_part": 0.0,
+ "p_reprint_per_part": 0.005,
+ "p_blocked_plate": 0.075,
+ "p_false_success_per_part": 0.0,
+ "realism": [
+  "realistic"
+ ],
+ "rake_s": 12.56,
+ "door_ok_rate": 1.0,
+ "outcomes": {
+  "placed": 199,
+  "swept": 1
+ }
+}

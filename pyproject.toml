@@ -1,0 +1,7 @@
+# Not an installable package: the repo is run from its root (PYTHONPATH=.). This file only configures tools.
+# Dependencies: requirements.txt (+ requirements-dev.txt for the tests).
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "real/tests"]   # scripts/test_*.py are runnable experiments, not unit tests
+pythonpath = ["."]
+addopts = "-q"

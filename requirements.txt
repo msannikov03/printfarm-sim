@@ -1,0 +1,13 @@
+# Exact versions of the environment the published numbers were measured in (Python 3.11, macOS arm64 and
+# Linux x86_64). Newer releases will probably work; these are the ones that were tested.
+mujoco==3.16.0
+numpy==2.4.6
+scipy==1.17.1
+matplotlib==3.11.2
+opencv-python-headless==5.0.0.93
+imageio==2.38.1
+imageio-ffmpeg==0.6.0
+pillow==13.0.0
+# real/ hardware toolkit: printer backends (websocket, USB serial)
+websockets==17.3
+pyserial==3.5

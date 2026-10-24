@@ -1,0 +1,16 @@
+# systemd USER unit for the SO-101 arm server (installed by real/pi/setup_pi.sh --service; @...@ are filled in).
+#   systemctl --user start|stop|status printpick-arm      journalctl --user -u printpick-arm -f
+[Unit]
+Description=PrintPick SO-101 arm server (JSON over TCP, Tailscale IP, port 8765)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=@ROOT@
+ExecStart=@VPY@ -m real.arm_server --port @PORT@ --listen auto:8765
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

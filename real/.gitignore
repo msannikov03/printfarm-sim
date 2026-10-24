@@ -1,0 +1,7 @@
+# per-machine / per-setup files (made on the hardware day), virtual envs, offline wheels
+.venv-arm/
+.venv-pi/
+pi/wheelhouse/
+calib.json
+joint_calib.json
+joint_map.json
