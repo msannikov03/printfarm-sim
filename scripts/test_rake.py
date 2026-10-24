@@ -2,7 +2,7 @@
 first, then the same loop as the end of plan.unload.unload_parts (scan, front-most blob, clear it, re-scan, at most
 RAKE_ROUNDS times). Reports where the thing ended (simulator truth, reporting only) and the robot's own final scan.
 
-python scripts/test_rake.py cube 150 80 [--yaw DEG] [--printer 4] [--tip] [--realism realistic] [--video] [--verbose]
+python scripts/test_rake.py cube 128 60 [--yaw DEG] [--printer 4] [--tip] [--realism realistic] [--video] [--verbose]
 python scripts/test_rake.py --suite debris|long [--printer 4,14] [--realism R] [--only SKUS] [--no-blob-pick] [--out F]
   debris: the debris SKUs (cube, block, knob, gear) across the deep and side areas of the bed (the two-row cell's
           hard cases); long: bar / plate / housing lying into the printer (yaw 90) and tipped, never picked first.

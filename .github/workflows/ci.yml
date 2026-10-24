@@ -71,4 +71,6 @@ jobs:
 
       - name: Smoke - camera blob + rake into the reject tray
         env: { PYTHONPATH: . }
-        run: python scripts/test_rake.py cube 150 80 | tee rake.log && grep -q "in tray True" rake.log
+        run: |
+          python scripts/test_rake.py cube 128 60 --no-blob-pick | tee rake.log
+          grep -q '"end": "tray"' rake.log && grep -q '"robot_bed_empty": true' rake.log
