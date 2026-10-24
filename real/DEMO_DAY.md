@@ -20,7 +20,7 @@ py -m pytest -q real/tests                                      # all pass, no h
 py -m real.arm_server --mock --listen 127.0.0.1:8765 &          # simulated servos behind the real server
 py -m real.run_demo --mock --live --arm remote://127.0.0.1:8765 --film --allow-nominal --sim-preview
 kill %1
-bash real/pi/make_wheelhouse.sh 3.14 aarch64     # Pi Python version! -> runs/printpick_pi_bundle.tar.gz (17 MB;
+bash real/pi/make_wheelhouse.sh 3.12 aarch64     # the Pi's Python (`python3 -V`; Ubuntu 24.04: 3.12) -> runs/printpick_pi_bundle.tar.gz (17 MB;
                                                  # NO_NUMPY=1 in front: 1.8 MB, numpy is optional)
 ```
 - Copy the bundle to the Pi now if it is reachable (`scp runs/printpick_pi_bundle.tar.gz <pi>:`), **and** onto a USB stick.

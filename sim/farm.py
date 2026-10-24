@@ -246,8 +246,15 @@ class Farm:
             if done:
                 self.events.append((self.t, i, "package_complete", done, slot))
 
+        drops0 = dict(getattr(self.ex, "blob_drops", None) or {})
         empty, unknown = unload_parts(self.ex, self.ik, i, p.plate, p.bodies, slot_for, on_result, self.rng)
         self.sync_clock()
+        drops1 = getattr(self.ex, "blob_drops", None) or {}
+        stray = sum(drops1.get(k, 0) - drops0.get(k, 0) for k in ("missed", "lost"))
+        if stray:                                       # a cleared blob not confirmed in the reject bin (on the deck,
+            self.stats["blob_not_in_reject"] += stray       # the floor, a bin rim): an operator collects it
+            self.stats["interventions"] += 1
+            self.jump(self.t + OPERATOR_S)
         if unknown > 200:
             self.stats["debris_flags"] += 1
         if not empty:                                   # camera cannot confirm a clear bed: an operator checks it

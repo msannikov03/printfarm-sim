@@ -23,7 +23,7 @@ import mujoco
 import numpy as np
 
 from farm import catalog as C
-from farm.world import HOME, LATCH_R
+from farm.world import GRIP_OPEN, HOME, LATCH_R
 from plan.ik import frame
 from plan.motion import cartesian_line
 
@@ -354,6 +354,8 @@ def execute_arc(ex, ik, i, plan, label, from_tuck=True):
     t0 = w.d.time
     if not transfer(ex, ik, plan["q_pre"], plan["x"]):
         return "no collision-free transfer to the pre-pose"
+    if float(w.d.ctrl[w.act_grip]) < GRIP_OPEN - 1e-4:     # an earlier step left the jaws shut: open them before
+        ex.grip(False, duration=0.3, label=f"{label}:open")   # they go around the bar
     th0 = plan["thetas"][0]
     p0 = plan["p0"]
     down = cartesian_line(ik, p0 - (PRE_BACK + GRASP_DEPTH) * plan["R0"][:, 2], p0, plan["R0"], plan["x"],

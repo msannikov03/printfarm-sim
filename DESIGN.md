@@ -15,13 +15,17 @@ the numbers below are copied from it. Module structure and data contracts are in
   keeps the whole arm under 0.70 m, so the carriage can drive under doors that are open. Without this, an open door
   blocks the rail, and the door can only be swung from one side of the hinge. A layout sweep found no workable
   geometry at the old base height.
-- **Caddy beside the arm** (two rows; behind it in the one-row cell): eight open bins on the deck on the +x side,
-  where the base joint (-150 to +175 deg) reaches them from both rows. Six hold one open order each; the other two
-  are `reject` and `waste` (purge tabs). Every drop pose is reachable, and a drop may lean up to 35°.
+- **Caddy beside the arm** (two rows; behind it in the one-row cell): eight bins on the deck on the +x side,
+  where the base joint (-150 to +175 deg) reaches them from both rows. Six are package totes with a trap-door bottom
+  (one package each, at most six small parts); the other two are `reject` and `waste` (purge tabs). Every drop pose
+  is reachable, and a drop may lean up to 35°. A two-slot tray beside them carries large parts, one per slot.
 - **Reject tray per printer**: a shallow tray in the gap under the front edge of the bed. Parts that cannot be
   picked are raked into it and reprinted; an operator empties the trays once per shift.
-- **Station** at the +x end of the rail: complete order bins are handed off there and packed by order volume
-  (`envelope` / `box_S` / `box_M`) into carrier lanes. The packaging line is kinematic.
+- **Packing station** at the +x end of the rail ([docs/station.md](docs/station.md)): each complete package goes
+  into a box of its size (S / M / L, chosen so the arm can place its large parts). The arm places the large parts,
+  the tote's trap door drops the small ones, a station depth camera checks the tote is empty, and the box is sealed
+  and sorted to its carrier lane. The station sits under the deck's overhang and outside the carriage's swept volume
+  by construction (`tests/test_station.py`); from sealing on it is kinematic.
 - **Why 0.40 m between rail and doors**: at 0.28-0.34 m the forearm hits the opposite row's D-handles during deep
   picks, at 0.37 m the doors open but do not close, at 0.43 m the back of the bed is out of reach. Printers per arm,
   station position and economics are compared in [docs/layout.md](docs/layout.md).

@@ -170,6 +170,57 @@ def test_wrist_camera_sees_a_part_between_the_jaws(world):
     assert empty < N_BETWEEN
 
 
+def _stick_on_pad(world, body, side, gw):
+    """Test setup: put a part flat against one pad's inner face (pinch frame +-y) of the open jaws."""
+    Rp = world.d.site_xmat[world.grasp_site].reshape(3, 3)
+    b = world.part_body[body]
+    k = C.CATALOG[world.part_sku[body]]
+    if k.kind == "box" and k.dims[2] < min(k.dims[:2]):       # a thin plate: its flat face on the pad
+        R = Rp @ np.array([[1.0, 0, 0], [0, 0, 1.0], [0, -1.0, 0]])
+        half = k.dims[2] / 2000
+    else:
+        R, half = Rp, min(k.footprint) / 2000
+    c = world.d.site_xpos[world.grasp_site] + Rp[:, 1] * side * (gw - half - 0.0005)
+    a = world.part_q[body]
+    quat = np.zeros(4)
+    mujoco.mju_mat2Quat(quat, R.flatten())
+    world.d.qpos[a:a + 3] = c - R @ world.m.body_ipos[b]
+    world.d.qpos[a + 3:a + 7] = quat
+    mujoco.mj_forward(world.m, world.d)
+
+
+@pytest.mark.parametrize("he_mm", [4.0, -4.0])
+def test_between_jaws_self_reference(world, he_mm):
+    """A hand-eye error along the jaw axis puts one pad inside the nominal jaw volume ("stuck on a finger" on every
+    release); the empty-jaw reference cancels it, and a part that really sticks to either pad is still seen."""
+    from farm.sensors import WristCam
+    from plan.unload import N_BETWEEN
+    _fresh(world)
+    gw = 0.037
+    world.d.qpos[world.finger_q], world.d.qpos[world.finger_rq] = gw, -gw
+    mujoco.mj_forward(world.m, world.d)
+    try:
+        cam = WristCam(world, sigma_mm=1.5, rng=np.random.default_rng(4))
+        nom = WristCam(world, sigma_mm=1.5, rng=np.random.default_rng(4), self_reference=False)
+        cam.handeye = nom.handeye = np.array([0.001, he_mm / 1000, -0.001])
+        empty, empty_nominal = cam.between_jaws(2000 * gw), nom.between_jaws(2000 * gw)
+        stuck = {}
+        for sku in ("cube", "lid"):
+            b = world.free_part(sku)
+            world.spawn(b, C.bed_mm_to_world(P, 150, 80), 0.0, stuck=False)
+            for side in (1, -1):
+                _stick_on_pad(world, b, side, gw)
+                stuck[(sku, side)] = cam.between_jaws(2000 * gw + 0.8)      # gap read 0.8 mm wide
+            world.park(b)
+        mujoco.mj_forward(world.m, world.d)
+    except Exception as e:                                 # no OpenGL context on this machine
+        pytest.skip(f"rendering unavailable: {e}")
+    assert cam.ref is not None and abs((cam.ref[1] + cam.ref[2]) / 2 - he_mm / 1000) < 0.001
+    assert empty_nominal >= 4 * N_BETWEEN                  # the failure: empty jaws read "stuck"
+    assert empty < N_BETWEEN
+    assert all(n >= 2 * N_BETWEEN for n in stuck.values()), stuck
+
+
 # ---- large SKUs (bed to box): packer, grasp across the narrow side, lowered placement into the tray ----
 
 def _parts(*skus):
@@ -327,3 +378,31 @@ def test_large_part_placed_flat_along_the_slot(world):
         world.park(b)
         world.d.qpos[world.rail_q] = world.d.ctrl[world.act_rail] = x0
         mujoco.mj_forward(world.m, world.d)
+
+
+def test_blob_box_follows_the_grasp():
+    """A blob picked for the reject bin is modelled as the box the camera saw (outline + height) held in the pinch
+    frame: at the grasp pose it sits on the bed (lowest point at bed level) where the camera saw it, with the
+    outline's horizontal extents; that is what the release lowers and fits between the bin walls."""
+    from plan.sweep import _blob_box
+    from plan.unload import box_pose
+
+    class FakeIK:                                          # box_pose needs only fk(q, x) -> (pinch, rotation)
+        def __init__(self, p, R):
+            self.p, self.R = p, R
+
+        def fk(self, q, x):
+            return self.p, self.R
+
+    blob = {"rect": ((120.0, 90.0), (40.0, 70.0), 15.0), "h": 30.0}
+    bed_z = C.BENCH_H + C.BED_ZL
+    target = np.array(C.bed_mm_to_world(P, 120.0, 90.0)) + [0.0, 0.0, 0.018]
+    a = np.radians(50.0)                                   # approach leaning 50 deg about the jaw axis (world y)
+    R = np.array([[np.cos(a), 0.0, np.sin(a)], [0.0, 1.0, 0.0], [np.sin(a), 0.0, -np.cos(a)]])
+    box = _blob_box(P, blob, {"R": R, "target": target})
+    low, cxy, ext = box_pose(FakeIK(target, R), box, None, None)
+    c15, s15 = np.cos(np.radians(15)), np.sin(np.radians(15))
+    want = np.abs(np.array([[c15, -s15], [s15, c15]])) @ np.array([0.020, 0.035])   # the 40 x 70 mm outline at 15 deg
+    assert low == pytest.approx(bed_z, abs=1e-6)
+    assert np.allclose(cxy, np.array(C.bed_mm_to_world(P, 120.0, 90.0))[:2], atol=1e-6)
+    assert np.allclose(np.sort(ext), np.sort(want), atol=1e-4)

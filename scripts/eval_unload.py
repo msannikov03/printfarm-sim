@@ -66,6 +66,8 @@ def episode(args):
     if globals().get("FAULTS"):
         faults = inject_faults(w, printer, plate, placed, rng)
     w.step(200)
+    fill = prefill_totes(w, opts.get("tote_fill", 0), np.random.default_rng(30_000 + seed)) \
+        if opts.get("tote_fill") else {}
     rec = Recorder(w.m, str(out / f"seed_{seed:03d}.mp4"),
                    view=lambda w: ([float(w.d.qpos[w.rail_q]) - 0.05, 0.05, 0.85], 1.5, 90 + 45, -25)) if video else None
     # actuation realism + the chamber camera noise use their own streams: the plates stay identical across presets
@@ -75,15 +77,22 @@ def episode(args):
         ik.belief = prior_belief(w, printer, plate, placed)       # before the first scan: the slicer's plate
     res = {"seed": seed, "printer": printer, "n_objects": len(plate["objects"]), "parts": [], "faults": faults,
            "realism": realism, "camera": U.CAMERA_NOISE, "oracle": U.ORACLE, "wrist_align": U.WRIST_ALIGN,
-           "skus": opts.get("skus", "small"), "max_print_h": opts.get("max_print_h", 3.0), "station_visits": 0}
+           "skus": opts.get("skus", "small"), "max_print_h": opts.get("max_print_h", 3.0), "station_visits": 0,
+           "tote_fill": fill}
+    if getattr(ex, "wrist", None) is not None:
+        res["handeye_mm"] = np.round(1000 * ex.wrist.handeye, 2).tolist()      # drawn calibration error (truth)
+    U.DROP_LOG = []
+    U.HOUSEKEEPING_LOG = []
+    name_of = {b: n for n, b in placed.items()}
     slots = {}
     tray = {s: None for s in C.LARGE_SLOTS}      # large-tray slot -> the part the robot put / is putting there
     large_slot = {}                              # large part -> its slot (scoring)
 
     def where_now(body, intended):
         """SIM truth, reporting only: where a part (or the debris lump) is now."""
-        if body not in w.in_use:
-            return "removed"            # left the bed elsewhere (side push, dropped): parked by the sim housekeeping
+        if body not in w.in_use:        # left the bed elsewhere (side push, dropped): parked by the sim housekeeping
+            where = next((e["where"] for e in U.HOUSEKEEPING_LOG if e["name"] == name_of.get(body)), None)
+            return f"removed_{where}" if where else "removed"
         if intended is not None and part_in_bin(w, body, intended):
             return "own_bin"
         if part_in_bin(w, body, "reject"):
@@ -92,7 +101,7 @@ def episode(args):
             return "other_bin"
         if in_tray(w, printer, body):
             return "tray"
-        return "on_bed" if on_bed(w, printer, body) else "elsewhere"
+        return "on_bed" if on_bed(w, printer, body) else U.where_off(w, body)    # deck, floor, printer
 
     try:
         ok, dt, note = operate_door(ex, ik, printer, opening=True)
@@ -135,7 +144,9 @@ def episode(args):
                                      "s": round(sec, 2), "believed_placed": outcome == "placed",
                                      "truly_placed": truly, "in_tray": bool(body in w.in_use and in_tray(w, printer, body)),
                                      "blocking": bool(body in w.in_use and on_bed(w, printer, body)),
-                                     "end": where_now(body, intended)})
+                                     "end": where_now(body, intended),
+                                     "drops": [dr for dr in U.DROP_LOG if dr.get("body") == body]})
+                U.DROP_LOG[:] = [dr for dr in U.DROP_LOG if dr.get("body") != body]
                 if name in large_slot and truly:         # truth, reporting: how centred the lowered placement is
                     sid = mujoco.mj_name2id(w.m, mujoco.mjtObj.mjOBJ_SITE, f"bin_{intended}")
                     p, q = w.part_pose(body)
@@ -159,12 +170,48 @@ def episode(args):
     if rec:
         rec.close()
     res["sim_s"] = float(w.d.time)
+    res["blob_drops"] = dict(getattr(ex, "blob_drops", {}) or {})   # blob picks into the reject bin, robot's verdict
+    res["parked_off"] = list(U.HOUSEKEEPING_LOG or [])              # truth: failed parts that lay off bed / bins
     res["wall_s"] = time.time() - t_wall
     if getattr(ex, "hw", None) is not None:
         res["actuation"] = {"zero_deg": np.round(np.degrees(ex.hw.zero), 3).tolist(),
                             "rail_zero_mm": round(1000 * ex.hw.rail_zero, 2)}
     (out / f"seed_{seed:03d}.json").write_text(json.dumps(res, indent=1))
     return res
+
+
+def prefill_totes(w, n_max, rng):
+    """Stress test for the drop: every order tote starts with 0..n_max small parts already in it (as in the farm,
+    where a tote collects a package of up to C.TOTE_MAX_PARTS parts over several plates). Each is dropped from above
+    the tote at a random pose and settles; one that does not end inside is taken away again. -> {tote: [skus]}"""
+    import mujoco
+    from farm import catalog as C
+    from plan.unload import part_in_bin
+    out = {}
+    for slot in C.CADDY_SLOTS:
+        if not slot.startswith("o"):
+            continue
+        sid = mujoco.mj_name2id(w.m, mujoco.mjtObj.mjOBJ_SITE, f"bin_{slot}")
+        mujoco.mj_forward(w.m, w.d)
+        rim = w.d.site_xpos[sid].copy()
+        out[slot] = []
+        for k in range(int(rng.integers(0, n_max + 1))):
+            sku = str(rng.choice(list(C.SMALL_SKUS)))
+            b = w.free_part(sku)
+            xy = rim[:2] + rng.uniform(-0.025, 0.025, 2)
+            w.spawn(b, [xy[0], xy[1], rim[2] + 0.03], float(rng.uniform(0, 2 * np.pi)), stuck=False)
+            a = w.part_q[b]
+            ax = rng.normal(size=3)
+            ax /= np.linalg.norm(ax)
+            ang = float(rng.uniform(0, np.pi))
+            w.d.qpos[a + 3:a + 7] = [np.cos(ang / 2), *(np.sin(ang / 2) * ax)]
+            w.step(400)
+            if part_in_bin(w, b, slot):
+                out[slot].append(sku)
+            else:
+                w.park(b)
+    mujoco.mj_forward(w.m, w.d)
+    return out
 
 
 def inject_faults(w, printer, plate, placed, rng):
@@ -218,6 +265,16 @@ def summarize(results):
             out["in_tray"] += bool(p.get("in_tray"))
             if not tru and "end" in p:
                 out[f"end:{p['end']}"] += 1                  # where the parts that are not in their bin are (truth)
+            for dr in p.get("drops", []):                    # every release over a bin (retries included)
+                out["drops"] += 1
+                out["drops_shaken"] += dr.get("shakes", 0) > 0
+                out["drops_stuck_first_check"] += bool(dr.get("n_between")) and dr["n_between"][0] >= 25
+                if "truly_in_bin" in dr:
+                    out["drops_not_in_bin"] += not dr["truly_in_bin"]
+                bc = dr.get("bin_check")
+                if bc:
+                    out[f"bin_check:{bc.get('verdict')}"] += 1
+                    out["bin_check_pushes"] += bc.get("pushes", 0)
             by_sku[p.get("sku", p["name"].split("_")[1] if "_" in p["name"] else "?")][p["outcome"]] += 1
     n = max(out["parts"], 1)
     by_size = {}
@@ -238,6 +295,11 @@ def summarize(results):
                                  slot_offset_x_mm_max=float(np.max(np.abs(off[:, 0]))),
                                  slot_yaw_deg_mean=float(np.mean(yaw)), slot_yaw_deg_max=float(np.max(yaw)))
     out["station_visits"] = sum(r.get("station_visits", 0) for r in results)
+    for r in results:
+        for k, v in (r.get("blob_drops") or {}).items():
+            out[f"blob_drop:{k}"] += v              # robot: blob picks confirmed in the reject bin / missed / stuck
+        for e in r.get("parked_off") or []:
+            out[f"parked_off:{e['where']}"] += 1    # truth: a failed part lay on the deck / floor / in the chamber
     out["bed_not_empty"] = sum(not r.get("bed_empty_after", True) for r in results)
     out["beds_blocked"] = sum(any(p.get("blocking") for p in r["parts"]) for r in results)
     deb = [r["faults"]["debris"] for r in results if r.get("faults", {}).get("debris")]
@@ -281,6 +343,8 @@ if __name__ == "__main__":
     ap.add_argument("--no-side-push", action="store_true", help="rake only toward the front edge")
     ap.add_argument("--skus", default="small", choices=["small", "mixed", "large"],
                     help="part mix (jobs.plates.sample_parts): small = the legacy plates; mixed / large need two rows")
+    ap.add_argument("--tote-fill", type=int, default=0,
+                    help="stress the drop: every order tote starts with 0..N small parts in it (the farm's piles)")
     ap.add_argument("--max-print-h", type=float, default=3.0,
                     help="plate print-time cap (default 3 h, the farm's MAX_PLATE_S: a large part and a few small "
                          "ones; 8 h = dense stress plates, up to three large parts with small ones packed behind)")
@@ -292,7 +356,7 @@ if __name__ == "__main__":
     OUT = pathlib.Path(a.out)
     OUT.mkdir(parents=True, exist_ok=True)
     opts = {"realism": a.realism, "camera": a.camera or a.realism, "oracle": a.oracle, "no_wrist": a.no_wrist,
-            "no_side_push": a.no_side_push, "skus": a.skus, "max_print_h": a.max_print_h}
+            "no_side_push": a.no_side_push, "skus": a.skus, "max_print_h": a.max_print_h, "tote_fill": a.tote_fill}
     jobs = [(s, s - a.start < a.videos, a.printer, str(OUT), a.faults, opts) for s in range(a.start, a.start + a.n)]
     results = []
     with mp.Pool(a.procs, maxtasksperchild=1) as pool:

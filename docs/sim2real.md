@@ -38,16 +38,17 @@ more than the 8 mm jaw pre-shape margin can absorb. Details and sources: [percep
 
 ## End to end, single-row cell: 40 random plates per batch, 195 parts (`scripts/eval_unload.py --realism ...`)
 
-| Sensors and actuation | Placed (robot's report) | Robot believed placed but wrong | Doors open / closed | Beds left clear | Sim s per pick |
+| Sensors and actuation | Truly placed | Robot believed placed but wrong | Doors open / closed | Beds left clear | Sim s per pick |
 |---|---|---|---|---|---|
-| Ideal | 195/195 (100.0 %) | 0 | 40/40 / 40/40 | 40/40 | 22.2 s |
-| Realistic | 194/195 (99.5 %) | 0 | 40/40 / 40/40 | 40/40 | 22.1 s |
-| Harsh | 137/195 (70.3 %) | 1 | 40/40 / 38/40 | 37/40 | 23.2 s |
-| Realistic + faults | 162/195 (83.1 %) | 0 | 40/40 / 40/40 | 39/40 | 22.1 s |
+| Ideal | 195/195 (100.0 %) | 0 | 40/40 / 40/40 | 40/40 | 23.5 s |
+| Realistic | 194/195 (99.5 %) | 0 | 40/40 / 40/40 | 40/40 | 23.6 s |
+| Harsh | 149/195 (76.4 %) | 0 | 40/40 / 37/40 | 33/40 | 24.6 s |
+| Realistic + faults | 162/195 (83.1 %) | 0 | 40/40 / 40/40 | 40/40 | 23.5 s |
 
-"Placed" counts the parts the robot reports placed (`outcome:placed`). Ground truth is that minus the false successes
-in the next column (harsh: 137/195), plus any part that did reach its bin while the robot reported a failure: these
-batches did not score that case, and on the two-row cell below it is large under harsh sensing.
+"Truly placed" is ground truth: the part lies in its intended bin. The robot's own verdict differs by the false
+successes in the next column (none) and by missed successes, parts that reached their bin while the robot reported a
+failure (harsh: 1 of 195; the other presets: 0). Before the self-referenced finger check (below) the harsh batch had
+20 missed successes.
 
 ## End to end, two-row cell: fresh seeds
 
@@ -56,25 +57,31 @@ The default cell, seeds 100+ (not used during development), row A = printer 4, r
 
 | Batch | Reported placed | Truly placed | False / missed successes | Debris left on the bed | Beds truly clear | Doors | Sim s per pick |
 |---|---|---|---|---|---|---|---|
-| Realistic + faults, row A, 20 plates | 67/82 | 68/82 (82.9 %) | 0 / 1 | 6/20 | 14/20 | 20/20 / 20/20 | 15.3 s |
-| Realistic + faults, row B, 20 plates | 67/82 | 67/82 (81.7 %) | 0 / 0 | 8/20 | 12/20 | 20/20 / 20/20 | 20.1 s |
-| Harsh, row A, 10 plates | 31/43 | 41/43 (95.3 %) | 0 / 10 | - | 10/10 | 10/10 / 10/10 | 15.9 s |
-| Harsh, row B, 10 plates | 30/43 | 39/43 (90.7 %) | 0 / 9 | - | 10/10 | 10/10 / 10/10 | 20.0 s |
+| Realistic + faults, row A, 20 plates | 67/82 | 67/82 (81.7 %) | 0 / 0 | 1/20 | 19/20 | 20/20 / 20/20 | 16.4 s |
+| Realistic + faults, row B, 20 plates | 66/82 | 66/82 (80.5 %) | 0 / 0 | 2/20 | 18/20 | 20/20 / 20/20 | 21.3 s |
+| Harsh, row A, 10 plates | 40/43 | 40/43 (93.0 %) | 0 / 0 | - | 10/10 | 10/10 / 10/10 | 17.0 s |
+| Harsh, row B, 10 plates | 38/43 | 39/43 (90.7 %) | 0 / 1 | - | 9/10 | 10/10 / 10/10 | 21.9 s |
 
-Re-running the published realistic seeds 0-19 on the same code reproduces them seed for seed (row A 99/100, row B
-100/100). What the failures are:
+The published realistic seeds 0-19 on the same code: row A 100/100, row B 99/100 (one part reached its bin while
+the robot reported a failure). What the failures are:
 - **Faults, parts.** Every plate has one part tipped onto its side. The camera no longer matches it ("missing") or the
   pick fails; it is then picked into the reject bin as an unknown blob (21 of 29 failed parts), raked into the tray
   (2) or pushed off a side edge (6, removed by the housekeeping). No part was left on a bed, so picking matches the
   single-row fault batch (83 %).
-- **Faults, debris.** The lump stays on 14 of 40 beds, against 1 of 40 on the single-row cell. The two-row bed is
-  12 cm farther from the rail (aisle half-width 0.40 m against 0.28 m), and the low poses the rake and the blob grasp
-  need are at the edge of reach: for a 42 x 10 mm gear lump at (56, 98) mm, the blob grasp finds no IK solution in
-  1829 tries and the front rake has exactly one feasible candidate (nominal arm model, clean bed). The camera flags every such bed "not empty", so none is silent, but each needs a person.
-- **Harsh.** 19 of the 25 parts the robot reported as failed are in their bins: on two plates per row the drawn
-  wrist-camera hand-eye error (1.5 mm per axis) puts the finger pads inside the "between the jaws" volume, so every
-  release on that plate reads "stuck on a finger". These are false alarms (the part would be reprinted, and an extra
-  part ships). The real failures are parts the camera cannot match (raked or picked away) and one drop in transit.
+- **Faults, debris.** The lump stays on 3 of 40 beds (it was 12-14 of 40 before the deep pushes). The two-row bed is
+  12 cm farther from the rail (aisle half-width 0.40 m against 0.28 m): the fingertips get within a few mm of the bed
+  only with the tool leaning at least 50 degrees into the printer, and at that lean a pull toward the door wedges the
+  lump into the bed. So when the front rake and the blob grasp find no plan, the robot holds one low, steep pose and
+  lets the carriage push the lump off the nearer side edge of the bed (then the far edge, a side push by the arm, a
+  push off the back), re-scanning after every stroke. Pushed lumps end on the chamber floor beside the bed: the printer
+  keeps printing, but a person collects them later. The three lumps left sit at the back corners, where no finger pose
+  reaches low enough; the camera flags each such bed "not empty".
+- **Harsh.** The drawn wrist-camera hand-eye error (1.5 mm per axis) used to put the finger pads inside the
+  "between the jaws" volume on some plates, so every release there read "stuck on a finger" (19 of 25 reported
+  failures were in their bins). The finger check is now self-referenced: at commissioning the wrist camera scans the
+  empty open jaws and measures where each pad really is, and the check tests against that. Missed successes went from
+  19 to 1; a part really stuck on a pad is still caught (`tests/test_planning.py`). The remaining failures are parts
+  the camera cannot match (raked or picked away) and drops in transit.
 
 ## Door (`scripts/test_door.py --all`, `scripts/door_robustness.py`)
 
@@ -105,8 +112,11 @@ carriage. Realistic preset, plates packed with the farm's 3 h cap (commands in [
 - Dense plates are the weak case: large parts and their jaw keep-outs take the front of the bed, so small parts land
   deep, where a lid or a gear near full jaw opening has a marginal grasp. The slicer stand-in only places a part where
   that SKU's own grasp map says it can be picked, which removes the ungraspable cells but not the marginal ones.
-- A long part lying into the printer that cannot be picked has no rake plan (the reject tray is in front of the bed):
-  it needs a person. Lying along the door, the bar and the plate are raked into the tray.
+- A long part lying into the printer that cannot be picked is pushed off the side edge of the bed like a debris lump
+  (`scripts/test_rake.py --suite long`: bars 12/12, plates 10/12 cleared); a housing is picked as a blob into the
+  reject bin (9/12 confirmed there, the other 3 reported lost in transit) or flagged for a person. Lying along the
+  door, the bar and the plate are raked into the tray.
+- The dense-plate rows were measured before the release check below; the 3 h rows are from the final code.
 
 **Packing station sensing.** The empty-tote check is a depth camera on a boom straight above the drop line, out of
 the arm's reach. Each check compares a scan with the per-pixel median of five reference scans taken at commissioning,
@@ -117,10 +127,15 @@ real dumps) and 0 missed leftovers in 800 checks with a part left in the tote (a
 above the floor). The first version (one reference scan, a camera on a post looking in at 37 degrees, so the near wall
 hid half the floor) raised 20 false alarms and missed 61 leftovers in 240 checks each.
 
-**A part on a tote wall.** In the final 16-plate farm run one lid (50 x 32 mm), dropped into its tote, came to rest
-on the tote's rim instead of its floor. The trap door cannot move it; the station camera saw it on both checks and
-the tote went to an operator, who put the lid into the box (nothing was lost). The unload's own release check
-only asks whether the part left the fingers, so it counted the drop as placed.
+**Releasing into a tote.** In an earlier 16-plate farm run one lid (50 x 32 mm) came to rest on a tote's rim; the
+station camera caught it and an operator moved it. The cause was the release: the jaw axis could be inclined, a lid
+held across its length slid onto the lower pad, and the wrist shake that frees a part from a finger flung it. Parts
+left on a finger at release: 114 of 1412 drops. Now the jaws are level along a tote diagonal, the part is lowered
+20 mm below the rim where the robot's last look shows room, and the wrist camera looks into the tote before and after
+the release (rim plane fitted in each scan, so calibration errors cancel). A part seen on the rim is pushed in with the
+closed jaws, at most twice, or reported as a failure; it is never counted as placed. After: 20 of 1416 drops leave a
+part on a finger, 0 end outside their bin, and in a targeted test 140 of 144 lids placed on a wall are called "on
+the rim" (the rest "not in bin"; none "in"). Each pick takes about 1.5 s longer.
 
 **Large-part placement at the station.** The arm measures each large part in its tray slot with the wrist camera,
 then plans grasp and place together, and collision-checks the whole place line (held part 3 mm, arm 6 mm from the
@@ -271,7 +286,7 @@ corrections as long as the real camera is within about 2x of the realistic model
 <= 18 N, and the fleet-level conclusions that depend on timings rather than contact physics (the arm is idle most of
 the time, so reliability matters more than speed). Most at risk: the absolute pick rates (99-100 % realistic), which
 rest on free parts, sticky simulated friction and primitive geometry; the rake and debris clearing, which already
-degrades on the two-row cell where the bed is 12 cm farther from the rail (14 of 40 debris lumps left, above); the
+degrades on the two-row cell where the bed is 12 cm farther from the rail (3 of 40 debris lumps left, above); the
 zero-intervention fleet numbers, because the DES restarts a printer even when the robot's camera says "not empty" or
 "cannot verify" (3-7.5 % of realistic unloads, 35 % of the two-row fault plates), where a real cell must call a
 person; and every time figure, because the YAM arm, its speed limits and the 0.4 m/s rail are assumptions.

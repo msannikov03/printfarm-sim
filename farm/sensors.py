@@ -143,6 +143,8 @@ def fk_pinch(ik, q, x):
 MOUNT_POS = np.array([0.0, -0.07, 0.02])       # in link_6: the scene's 'wrist' camera mount point
 PINCH_IN_L6 = np.array([0.0, -0.044, 0.1367])  # the pinch site in link_6 (farm/scene.py)
 NEAR_M = 0.02                                   # wrist camera near plane (m)
+COMMISSION_SCANS = 5                            # empty-jaw reference: scans averaged
+HANDEYE_BAND = 0.006                            # ... a pad face is looked for within this of its nominal place (m)
 
 
 class WristCam:
@@ -151,7 +153,7 @@ class WristCam:
     Points are returned in the PINCH frame (x, y = jaw closing axis, z = approach), which needs only the
     hand-eye calibration, not the arm's kinematics. Uses the default free-camera field of view."""
 
-    def __init__(self, world, width=320, height=240, sigma_mm=0.0, handeye_mm=0.0, rng=None):
+    def __init__(self, world, width=320, height=240, sigma_mm=0.0, handeye_mm=0.0, rng=None, self_reference=True):
         self.w = world
         self.W, self.H = width, height
         self.r = None
@@ -166,6 +168,8 @@ class WristCam:
         self.sigma = sigma_mm / 1000
         self.handeye = rng.normal(0.0, handeye_mm / 1000, 3) if handeye_mm else np.zeros(3)
         self.renders = 0
+        self.ref = None                  # empty-jaw reference (commission), taken at the first between-jaws check
+        self.self_reference = self_reference
 
     def _renderer(self):
         if self.r is None:
@@ -175,8 +179,13 @@ class WristCam:
 
     def points_pinch(self, max_range=0.45):
         """Depth image -> points (m) in the pinch frame."""
-        m, d = self.w.m, self.w.d
-        mujoco.mj_kinematics(m, d)
+        mujoco.mj_kinematics(self.w.m, self.w.d)
+        return self._points(self.w.d, max_range)
+
+    def _points(self, d, max_range=0.45, only=None, rng=None):
+        """Render from state d (kinematics computed). only: body ids that are drawn (None: the whole scene); rng: the
+        depth-noise stream (default: the camera's own)."""
+        m = self.w.m
         b = self.w.link6
         R6, p6 = d.xmat[b].reshape(3, 3), d.xpos[b]
         cpos = p6 + R6 @ MOUNT_POS
@@ -193,6 +202,12 @@ class WristCam:
         m.vis.map.znear = NEAR_M / max(m.stat.extent, 1e-6)    # a short-range depth camera sees from ~2 cm
         try:
             r.update_scene(d, camera=self.cam, scene_option=self.opt)
+            if only is not None:                     # everything else is moved out of the camera's range
+                scn = r.scene
+                for k in range(scn.ngeom):
+                    gk = scn.geoms[k]
+                    if gk.objtype != mujoco.mjtObj.mjOBJ_GEOM or m.geom_bodyid[gk.objid] not in only:
+                        gk.pos[:] = (0.0, 0.0, -100.0)
             depth = r.render().astype(np.float64)
         finally:
             m.vis.map.znear = znear
@@ -205,7 +220,7 @@ class WristCam:
         v, u = np.mgrid[0:self.H, 0:self.W]
         z = depth
         if self.sigma:
-            z = z + self.rng.normal(0.0, self.sigma, z.shape)
+            z = z + (self.rng if rng is None else rng).normal(0.0, self.sigma, z.shape)
         ok = (depth > 0.01) & (depth < max_range)
         xc = (u - self.W / 2 + 0.5) * z / fpx
         yc = -(v - self.H / 2 + 0.5) * z / fpx
@@ -215,11 +230,57 @@ class WristCam:
         Rp, pp = d.site_xmat[sid].reshape(3, 3), d.site_xpos[sid]
         return (pw - pp) @ Rp + self.handeye
 
+    def commission(self, gap_mm=None, scans=COMMISSION_SCANS, half_len=0.012, half_w=0.010):
+        """Reference scan of the empty open jaws (once, at installation: the jaws fully open, `gap_mm` from the
+        averaged gripper encoder, nothing but the gripper in view; the sim renders a copy of the state with only the
+        gripper drawn, so it does not matter what the live jaws hold). Measures where the inner face of each pad
+        appears in this camera's own pinch frame: the between-the-jaws test then runs against the measured jaws, not
+        the nominal ones, which cancels the hand-eye error along the jaw axis (and pad wear, a bent finger).
+        Returns the reference (gap_mm, +y face, -y face) or None if the pads were not seen."""
+        from farm.world import GRIP_OPEN
+        gap_mm = 2000 * GRIP_OPEN if gap_mm is None else gap_mm
+        m = self.w.m
+        d = mujoco.MjData(m)
+        d.qpos[:] = self.w.d.qpos
+        g = gap_mm / 2000
+        d.qpos[self.w.finger_q], d.qpos[self.w.finger_rq] = g, -g
+        mujoco.mj_kinematics(m, d)
+        grip = self.w.finger_bodies | {self.w.link6}
+        rng = np.random.default_rng(7)               # own noise stream: the episode's stream stays as it was
+        pts = np.vstack([self._points(d, only=grip, rng=rng) for _ in range(scans)])
+        win = (np.abs(pts[:, 0]) < half_w) & (np.abs(pts[:, 2]) < half_len)
+        faces = []
+        for side in (1.0, -1.0):
+            y = side * pts[win, 1]
+            y = y[np.abs(y - g) < HANDEYE_BAND]     # the pad's inner face, within the hand-eye tolerance of nominal
+            if len(y) < 50 * scans:
+                self.ref = None
+                return None
+            faces.append(side * float(np.percentile(y, 10)))   # the innermost surface, robust to noise
+        self.ref = (float(gap_mm), faces[0], faces[1])
+        return self.ref
+
     def between_jaws(self, gap_mm, pts=None, half_len=0.012, half_w=0.010, inset=0.003):
-        """Number of depth points inside the jaw volume (between the pads): something is held / stuck."""
+        """Number of depth points inside the jaw volume (between the pads, `inset` in from each): something is held /
+        stuck. The pads are where the empty-jaw reference saw them (commission), moved by the measured gap change;
+        without a reference (no rendering), at their nominal place."""
         p = self.points_pinch() if pts is None else pts
-        hy = max(gap_mm / 2000 - inset, 0.002)
-        sel = (np.abs(p[:, 0]) < half_w) & (np.abs(p[:, 1]) < hy) & (np.abs(p[:, 2]) < half_len)
+        if self.ref is None and self.self_reference:
+            self.self_reference = False             # (taken once; if the pads were not seen: nominal jaws)
+            try:
+                self.commission()
+            except Exception:                       # no rendering for the reference: nominal jaws
+                pass
+        if self.ref is not None:
+            g0, fp, fn = self.ref
+            dg = (gap_mm - g0) / 2000
+            hi, lo = fp + dg - inset, fn - dg + inset
+            if hi - lo < 0.004:
+                hi, lo = (hi + lo) / 2 + 0.002, (hi + lo) / 2 - 0.002
+        else:
+            hi = max(gap_mm / 2000 - inset, 0.002)
+            lo = -hi
+        sel = (np.abs(p[:, 0]) < half_w) & (p[:, 1] < hi) & (p[:, 1] > lo) & (np.abs(p[:, 2]) < half_len)
         return int(sel.sum())
 
     def close(self):

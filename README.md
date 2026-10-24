@@ -25,7 +25,7 @@ middle of the aisle, and the arm turns between the rows. For each finished print
 
 A discrete-event model of the whole farm then runs a simulated week on the timings measured in physics. Its answer:
 printer utilisation goes from **48 %** with an operator on day shifts to **87 %** with the robot,
-and order lead time p90 drops from **99.9 h** to **10.3 h**.
+and order lead time p90 drops from **99.9 h** to **10.2 h**.
 
 ![A full unload cycle, sped up](docs/media/showcase.gif)
 
@@ -47,28 +47,29 @@ travel. 20 random plates per row, realistic sensors and actuation:
 
 | Printer | Parts placed | Doors open / closed | Printers blocked | Sim time per pick |
 |---|---|---|---|---|
-| Row A (printer 5) | 99/100 (99.0 %) | 20/20 / 20/20 | 0 | 15.9 s |
-| Row B (printer 15, facing) | 100/100 (100.0 %) | 20/20 / 20/20 | 0 | 20.3 s |
+| Row A (printer 5) | 100/100 (100.0 %) | 20/20 / 20/20 | 0 | 17.2 s |
+| Row B (printer 15, facing) | 99/100 (99.0 %) | 20/20 / 20/20 | 0 | 21.9 s |
 
 The [layout study](docs/layout.md) puts the knee at about 50 printers per arm: with 20 the arm is busy only
-30 % of the time, so the cell has room for slower parts, more failures or more printers.
+32 % of the time, so the cell has room for slower parts, more failures or more printers.
 
 **Sensors from ideal to harsh** (40 random plates per batch, measured on the single-row cell). Picking carries over
-to the two-row cell (same printer, arm, door and perception; checked above). Debris clearing does not fully: the
-two-row beds sit 12 cm farther from the rail, and in two-row fault batches a debris lump stayed on 14 of 40 beds
-(the camera flagged every one, see [sim2real](docs/sim2real.md)).
+to the two-row cell (same printer, arm, door and perception; checked above). Debris clearing is harder there: the
+two-row beds sit 12 cm farther from the rail, so the robot pushes far debris off the side edge of the bed with the
+carriage; in two-row fault batches a lump stayed on 3 of 40 beds (the camera flagged every one, see
+[sim2real](docs/sim2real.md)).
 
 | Scenario | Parts placed | Doors open / closed | Beds left clear | Sim time per pick |
 |---|---|---|---|---|
-| Ideal sensors | 195/195 (100.0 %) | 40/40 / 40/40 | 40/40 | 22.2 s |
-| Realistic sensors and actuation: depth noise, calibration errors, encoder noise, latency | 194/195 (99.5 %) | 40/40 / 40/40 | 40/40 | 22.1 s |
-| Harsh sensors and actuation (2x depth noise, about 3x calibration and actuation errors) | 137/195 (70.3 %) | 40/40 / 38/40 | 37/40 | 23.2 s |
-| Realistic + faults: one tipped part + one debris lump per bed | 162/195 (83.1 %) | 40/40 / 40/40 | 39/40 | 22.1 s |
+| Ideal sensors | 195/195 (100.0 %) | 40/40 / 40/40 | 40/40 | 23.5 s |
+| Realistic sensors and actuation: depth noise, calibration errors, encoder noise, latency | 194/195 (99.5 %) | 40/40 / 40/40 | 40/40 | 23.6 s |
+| Harsh sensors and actuation (2x depth noise, about 3x calibration and actuation errors) | 149/195 (76.4 %) | 40/40 / 37/40 | 33/40 | 24.6 s |
+| Realistic + faults: one tipped part + one debris lump per bed | 162/195 (83.1 %) | 40/40 / 40/40 | 40/40 | 23.5 s |
 
 "Placed" is ground truth (the part really is in its order bin); the robot itself only uses its sensors to decide.
 In the fault batch every part that could not go to its order bin was cleared off the bed (raked into the reject
 tray, picked into the reject bin or pushed off the side edge: **100 %** of them), so those printers kept
-printing instead of waiting for a person; one debris lump stayed on one bed and the camera flagged it.
+printing instead of waiting for a person, and no debris lump stayed on a bed.
 
 **Perception**: part centre error after refining the slicer prior with chamber-camera depth:
 
@@ -84,23 +85,22 @@ printer for the robot and the human):
 |---|---|---|
 | Printer utilisation | 87 % | 48 % |
 | Parts per day | 557 | 289 |
-| Order lead time, p50 / p90 | 6.0 h / 10.3 h | 61.6 h / 99.9 h |
-| Robot busy | 30 % | n/a |
+| Order lead time, p50 / p90 | 6.0 h / 10.2 h | 61.6 h / 99.9 h |
+| Robot busy | 32 % | n/a |
 
 With large parts in the order mix (16 % of parts) at the same print load, the robot cell makes
-404 parts per day against 207, with order lead time p50 / p90 5.8 h / 10.7 h against
+403 parts per day against 207, with order lead time p50 / p90 5.8 h / 10.8 h against
 69.6 h / 106.8 h.
 
-The robot is busy only 30 % of the time, so the real constraint is reliability, not speed. Without the
+The robot is busy only 32 % of the time, so the real constraint is reliability, not speed. Without the
 rake, every failed pick blocks its printer until the next shift, and the robot cell's output falls to the human
 baseline at about **7 %** failures per part. With the rake (failed parts are cleared and reprinted) it
 still out-produces the human at 20 % failures per part (23.3 vs 16.1 parts per printer per day). Layout options (rows, printers per arm) are compared in [docs/layout.md](docs/layout.md).
 
 **Whole cell, physics end to end** (`scripts/run_farm.py`, 20 printers, realistic sensors, large parts in the
-order mix): 16 plates in 7.2 farm-hours, 51/51 picks placed, doors 16/16 opened and 16/16 closed,
-12/12 boxes sealed complete, order lead time p50 / p90 2.2 h / 3.1 h (orders shipped within the run);
-operator interventions: 1 (a lid that came to rest on a tote wall, caught by the station camera; see
-[sim2real](docs/sim2real.md)).
+order mix): 16 plates in 7.0 farm-hours, 51/51 picks placed, doors 16/16 opened and 16/16 closed,
+11/11 boxes sealed complete, order lead time p50 / p90 2.3 h / 3.2 h (orders shipped within the run);
+operator interventions: 0.
 
 **From bed to box** ([docs/station.md](docs/station.md)). An order ships as one or more packages: at most
 6 small parts, which ride in one tote on the carriage, plus at most two large parts (housing, plate,
@@ -114,8 +114,8 @@ box goes to the sealer and its carrier lane. One box and one tote at a time, so 
 | | Result |
 |---|---|
 | Large parts, bed to tray (20 plates per row, realistic) | 40/40 placed (row A 20/20, row B 20/20) |
-| Station bench (realistic): packages boxed, parts in the right box | 52/52 boxes complete, 151 parts, 0 missing, 0 operator calls, 0 robot-station contacts |
-| Robot time at the station per package (measured) | 20 s (sd 8 s, n = 52) |
+| Station bench (realistic): packages boxed, parts in the right box | 53/53 boxes complete, 151 parts, 0 missing, 0 operator calls, 0 robot-station contacts |
+| Robot time at the station per package (measured) | 20 s (sd 7 s, n = 53) |
 | Partial packages handed to an operator, per week (DES) | 0.8 (small parts only; 40 with first-in-first-out printing), 1.0 with large parts in the mix |
 
 The last row is a scheduling result: printing a package's parts on as few plates as possible keeps its tote from
@@ -193,7 +193,7 @@ baseline. Architecture and data contracts: [docs/architecture.md](docs/architect
 | Door latch, handle grip | magnetic catch (pull ~ 1/(1+g)^2) and a jaw grasp around the handle bar, contact forces only | the catch force must be measured (spec: <= 18 N for a squeeze hold, else non-backdrivable jaws) |
 | Robot's own state | encoder noise, joint-zero and link calibration error, backlash, latency (presets) | measured per arm at commissioning |
 | Print time, cooling, order rates | assumptions, all listed in `fleet/des.py` `Params` | measure per farm |
-| Packaging line | kinematic animation | not built |
+| Packing station | trap-door totes, the box contents, the large-part place and the station depth camera are physics; the boxes ride on prescribed joints, and from sealing on (sealer, sorter, lanes) it is kinematic | not built; the totes, the tray and the camera check are the parts a real cell would need first |
 
 The full noise and failure model, and how the planners cope with it, is in [docs/sim2real.md](docs/sim2real.md).
 
@@ -247,23 +247,23 @@ Everything in `real/` is tested against mock printers (`real/tests`, no hardware
 | Path | What |
 |---|---|
 | `farm/` | layout constants, MJCF scene builder, runtime world (adhesion, latches), lab dressing, video tools |
-| `plan/` | IK with the rail as a 7th axis, RRT-Connect, door primitive, grasp synthesis and unloading, rake fallback, bed map |
+| `plan/` | IK with the rail as a 7th axis, RRT-Connect, door primitive, grasp synthesis and unloading, rake fallback, bed map, packing-station skills |
 | `perceive/` | chamber-camera depth vs the slicer prior: pose refinement, missing parts, debris, bed-empty check |
-| `jobs/` | order stream, slicer stand-in (MaxRects, labelled G-code), G-code parser |
-| `fleet/` | caddy allocator, scheduling policies, discrete-event simulation |
+| `jobs/` | order stream, package planner (order -> packages -> box size), slicer stand-in (MaxRects, labelled G-code), G-code parser |
+| `fleet/` | package-aware caddy allocator, print-queue policy, scheduling policies, discrete-event simulation |
 | `sim/` | the whole cell loop (farm clock + physics robot actions) |
 | `report/` | plots from the DES output |
 | `scripts/` | runnable experiments: single-skill tests, batch evaluation, layout studies, rendering |
 | `real/` | hardware toolkit: printer backends, G-code parts, calibration, SO-101 kinematics and driver |
 | `tests/`, `real/tests/` | unit tests (run in CI) |
-| `docs/` | [architecture](docs/architecture.md), [results](docs/results.md), [sim2real](docs/sim2real.md), [door](docs/door.md), [perception](docs/perception.md), [layout](docs/layout.md) |
+| `docs/` | [architecture](docs/architecture.md), [results](docs/results.md), [sim2real](docs/sim2real.md), [door](docs/door.md), [perception](docs/perception.md), [layout](docs/layout.md), [station](docs/station.md) |
 
 ## Roadmap
 
-- Debris clearing in the two-row cell: far-back debris is at the edge of reach from the 0.40 m aisle (14 of 40
-  fault plates kept a lump); a longer rake stroke or a dedicated sweep tool on the carriage.
+- Debris clearing in the two-row cell: lumps in the back corners are out of reach of any low finger pose (3 of 40
+  fault plates kept a lump), and pushed lumps end on the chamber floor; a dedicated sweep tool on the carriage.
 - Large parts on dense plates: small parts pushed deep behind a large part have marginal grasps (about 82 % on
-  plates packed to 8 h, 100 % at the farm's 3 h cap); a long part lying into the printer cannot be raked.
+  plates packed to 8 h, 100 % at the farm's 3 h cap); an unpickable housing lying into the printer may need a person.
 - Grow toward the layout study's 2 x 20 printers per arm (the arm is busy about a quarter of the week at 2 x 10).
 - Calibrate the depth-noise model against a real chamber camera and close the loop on the real printer.
 - Door opening on a real enclosure: measure the catch force and the handle grip on hardware.

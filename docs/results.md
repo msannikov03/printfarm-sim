@@ -18,17 +18,17 @@ python scripts/fill_results.py --lint                                    # nothi
 
 | Placeholders | Command | Read from |
 |---|---|---|
-| `ROWA_*`, `ROWB_*` | `python scripts/eval_unload.py --n 20 --procs 5 --realism realistic --printer 4 --out runs/two_rows/eval_p4` (row A) / `--printer 14 --out runs/two_rows/eval_p14` (row B), default two-row cell | `runs/two_rows/eval_p4/summary.json`, `runs/two_rows/eval_p14/summary.json` |
-| `IDEAL_*` | `PRINTFARM_LAYOUT=one_row python scripts/eval_unload.py --n 40 --procs 8 --realism ideal --out runs/final/ideal` | `runs/final/ideal/summary.json` |
-| `REAL_*` | same with `--realism realistic --out runs/final/realistic` | `runs/final/realistic/summary.json` |
-| `HARSH_*` | same with `--realism harsh --out runs/final/harsh` | `runs/final/harsh/summary.json` |
-| `FAULT_*` | same with `--realism realistic --faults --out runs/final/realistic_faults` | `runs/final/realistic_faults/summary.json` |
+| `ROWA_*`, `ROWB_*` | `python scripts/eval_unload.py --n 20 --procs 5 --realism realistic --printer 4 --out runs/two_rows_v3/eval_p4` (row A) / `--printer 14 --out runs/two_rows_v3/eval_p14` (row B), default two-row cell | `runs/two_rows_v3/eval_p4/summary.json`, `runs/two_rows_v3/eval_p14/summary.json` |
+| `IDEAL_*` | `PRINTFARM_LAYOUT=one_row python scripts/eval_unload.py --n 40 --procs 8 --realism ideal --out runs/final_v3/ideal` | `runs/final_v3/ideal/summary.json` |
+| `REAL_*` | same with `--realism realistic --out runs/final_v3/realistic` | `runs/final_v3/realistic/summary.json` |
+| `HARSH_*` | same with `--realism harsh --out runs/final_v3/harsh` | `runs/final_v3/harsh/summary.json` |
+| `FAULT_*` | same with `--realism realistic --faults --out runs/final_v3/realistic_faults` | `runs/final_v3/realistic_faults/summary.json` |
 
-- `*_PLACED`: `counts["outcome:placed"] / counts.parts`, the parts the **robot reports** placed (that is what
-  `scripts/fill_results.py` reads). Ground truth is `counts["truly_placed"]`; the two differ by the false successes
-  (`*_FALSE`) and the missed successes (`counts["missed_success"]`: in the bin, but reported as a failure). Since the
-  audit commit, a part the robot gave up on is also scored against its intended bin (before, every part the robot
-  reported failed counted as not placed). The purge tabs count as parts: one per plate, and each goes to the waste bin.
+- `*_PLACED`: `counts["truly_placed"] / counts.parts`, ground truth: the part lies in its intended bin (that is
+  what `scripts/fill_results.py` reads). The robot's own verdict is `counts["outcome:placed"]`; the two differ by
+  the false successes (`*_FALSE`) and the missed successes (`counts["missed_success"]`: in the bin, but reported
+  as a failure). The purge tabs count as parts: one per plate, and each goes to the waste bin.
+- `--tote-fill N` (stress option): every tote starts with 0-N parts already in it, so releases land on a pile.
 - `*_DOORS`: `door_open_ok / episodes` and `door_close_ok / episodes`.
 - `*_BEDS`: `episodes - beds_blocked - debris_left_on_bed`: beds that are truly clear after the unload (ground truth;
   the robot's own camera verdict is reported separately as `bed_not_empty`, which also counts "cannot verify").
@@ -93,7 +93,7 @@ Ground-truth poses are used only to compute these errors. The planners never see
 
 | Placeholders | Command | Read from |
 |---|---|---|
-| `BOX_LARGE` | `python scripts/eval_unload.py --n 20 --realism realistic --skus mixed --printer 4 --out runs/verify/mixed_p4` (row A) / `--printer 14 --out runs/verify/mixed_p14` (row B); plates are packed with the farm's 3 h cap | `summary.json` `by_size.large`: `truly_placed / parts` |
+| `BOX_LARGE` | `python scripts/eval_unload.py --n 20 --realism realistic --skus mixed --printer 4 --out runs/verify_v3/mixed_p4` (row A) / `--printer 14 --out runs/verify_v3/mixed_p14` (row B); plates are packed with the farm's 3 h cap | `summary.json` `by_size.large`: `truly_placed / parts` |
 | `BOX_BENCH` | `python scripts/run_farm.py --station-bench 12 --realism realistic --out runs/station_bench` (station only: random orders, parts spawned into the totes and the tray) | `runs/station_bench/summary_s0.json` `station.stats`, set by hand |
 | `BOX_STATION_S` | the same bench with `--times runs/station_times.json` | `runs/station_times.json` `package`: robot-blocking time per package (box request, large-part places, tote dump and camera check; sealing runs in the background) |
 | `BOX_PARKS` | `python -m fleet.des --compare --days 7 --seeds 5 --skus small --queue-policy fifo` vs `--queue-policy package`; with large parts the `DES_ALL_*` runs | `partial_handoffs` per week (an incomplete package's tote or tray slot handed to the station's consolidation shelf, i.e. an operator task): `runs/des_box_pkg/queue_policy.json` (small mix) and `runs/des_final/all148/summary.txt`, set by hand |

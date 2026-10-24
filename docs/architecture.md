@@ -135,8 +135,8 @@ alloc.park(slot)                     # deadlock breaker: an incomplete package's
 | Thing | How it is modelled |
 |---|---|
 | arm, rail, gripper, parts, door hinge, end stop | MuJoCo rigid-body dynamics with contacts and friction |
-| door latch, handle coupler | equality constraints switched at runtime: a magnet latch and a rigid lock while the gripper holds the handle |
+| door latch, handle grasp | a magnetic catch force on the leaf (pull ~ 1/(1+g)^2); the jaws hold the handle bar by contact forces only (`plan.door.COUPLING = "physical"`; a rigid weld coupler is kept for A/B comparison) |
 | bed adhesion | a weld per part, released once the bed has cooled below the release temperature |
 | chamber camera | MuJoCo depth render. The sensor-noise and failure model is described in [sim2real.md](sim2real.md) |
 | print and cooling time, order arrivals | timers and seeded random processes (assumptions, listed in `fleet/des.py` `Params`) |
-| packaging line, carrier lanes | kinematic animation |
+| packing station | trap-door totes, box contents, the large-part place and the station camera are physics; boxes ride on prescribed joints; sealer, sorter and lanes are kinematic |
