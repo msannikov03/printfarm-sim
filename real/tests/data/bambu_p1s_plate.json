@@ -1,0 +1,31 @@
+{
+ "source": "BambuStudio 02.08.02.61 (Bambu Lab P1S 0.4 nozzle, 0.20mm Standard, no brim), arranged by the slicer; models real.mesh_io.cup_mesh() as gen_enclosure.stl and l_bracket_mesh() as gen_l_bracket.stl",
+ "meshes": {
+  "gen_enclosure.stl": {
+   "identify_id": 47,
+   "plate_center_mm": [
+    128.0,
+    139.0
+   ],
+   "footprint_mm": [
+    60.0,
+    40.0
+   ],
+   "yaw_deg": 0.0,
+   "height_mm": 25.0
+  },
+  "gen_l_bracket.stl": {
+   "identify_id": 58,
+   "plate_center_mm": [
+    131.679,
+    107.0
+   ],
+   "footprint_mm": [
+    50.0,
+    20.0
+   ],
+   "yaw_deg": 0.0,
+   "height_mm": 30.0
+  }
+ }
+}

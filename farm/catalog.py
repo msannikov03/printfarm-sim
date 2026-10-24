@@ -97,6 +97,16 @@ class SKU:
     kind: str      # "box": (x, y, z) | "cyl": (d, h) | "L": (len, width, base_t, upright_h, upright_t), mm
     dims: tuple
     solid_frac: float = 1.0   # printed material / bounding volume (hollow housings, tubes); sim geometry stays solid
+    # real parts from a mesh (sim/real_parts.py): kind "box", dims = the footprint rectangle x height the planner
+    # works with; the body's collision geometry is convex mesh pieces (col_meshes: vertex lists, mm, part frame) and
+    # the chamber cameras see the true mesh (vis_mesh: an STL in the part frame, mm). top_mm = (tx, ty, ox, oy, area):
+    # the extent, centre offset and area (mm^2) of the top face, where the depth camera finds the part's highest surface
+    vis_mesh: str = ""
+    col_meshes: tuple = ()
+    top_mm: tuple = ()
+    grasp_mm: tuple = ()      # real parts: (cx, cy, wx, wy) where the jaws close (centre, opening along x / y), from
+                              # the part's cross-sections at the grasp heights (the slicer's layers there)
+    pool: int = 0             # pooled bodies of this SKU in the scene (0: farm.scene.POOL_PER_SKU)
 
     @property
     def large(self):
@@ -146,6 +156,15 @@ CATALOG = {s.name: s for s in [
     # cells, and at 10 mm only the pad tips touch it (the long part creeps out of the jaws in transit)
     SKU("bar",      "box", (150, 18, 18), solid_frac=0.6),   # square tube
 ]}
+
+
+def register_sku(sku: SKU) -> SKU:
+    """Add a SKU (e.g. a real part from a mesh) to CATALOG, before the scene is built (farm.scene reads CATALOG).
+    The order mix (SMALL_SKUS, LARGE_SKUS, ORDER_SKUS) is fixed at import and does not change."""
+    CATALOG[sku.name] = sku
+    return sku
+
+
 SMALL_SKUS = tuple(n for n, s in CATALOG.items() if not s.large)   # insertion order = the legacy catalogue order
 LARGE_SKUS = tuple(n for n, s in CATALOG.items() if s.large)
 ORDER_SKUS = SMALL_SKUS + LARGE_SKUS if TWO_ROWS else SMALL_SKUS   # what orders draw from (one row: no large-part tray)

@@ -38,7 +38,11 @@ real/
   run_demo.py       end-to-end script
   mock_printer.py   mock Creality WS / Moonraker / OctoPrint servers (print -> complete -> cooling)
   synth_gcode.py    synthetic labelled/unlabelled G-code (tests, mocks)
+  bambu.py          BambuStudio command line: models -> one arranged P1S plate -> labelled G-code in a 3MF
+  mesh_io.py        STL / 3MF meshes: footprints, top faces, grasp cross-sections, generated test parts
+  fetch_models.py   download the openly licensed test models in open_models.json (docs/real_models.md)
   assets/so101/     mujoco_menagerie robotstudio_so101 (gitignored; ./real/fetch_assets.sh re-fetches)
+  assets/models/    the open test models (gitignored; python -m real.fetch_models re-fetches)
   tests/            pytest, no hardware needed
 ```
 

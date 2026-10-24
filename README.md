@@ -51,7 +51,7 @@ travel. 20 random plates per row, realistic sensors and actuation:
 | Row B (printer 15, facing) | 99/100 (99.0 %) | 20/20 / 20/20 | 0 | 21.9 s |
 
 The [layout study](docs/layout.md) puts the knee at about 50 printers per arm: with 20 the arm is busy only
-32 % of the time, so the cell has room for slower parts, more failures or more printers.
+31 % of the time, so the cell has room for slower parts, more failures or more printers.
 
 **Sensors from ideal to harsh** (40 random plates per batch, measured on the single-row cell). Picking carries over
 to the two-row cell (same printer, arm, door and perception; checked above). Debris clearing is harder there: the
@@ -86,13 +86,13 @@ printer for the robot and the human):
 | Printer utilisation | 87 % | 48 % |
 | Parts per day | 557 | 289 |
 | Order lead time, p50 / p90 | 6.0 h / 10.2 h | 61.6 h / 99.9 h |
-| Robot busy | 32 % | n/a |
+| Robot busy | 31 % | n/a |
 
 With large parts in the order mix (16 % of parts) at the same print load, the robot cell makes
 403 parts per day against 207, with order lead time p50 / p90 5.8 h / 10.8 h against
 69.6 h / 106.8 h.
 
-The robot is busy only 32 % of the time, so the real constraint is reliability, not speed. Without the
+The robot is busy only 31 % of the time, so the real constraint is reliability, not speed. Without the
 rake, every failed pick blocks its printer until the next shift, and the robot cell's output falls to the human
 baseline at about **7 %** failures per part. With the rake (failed parts are cleared and reprinted) it
 still out-produces the human at 20 % failures per part (23.3 vs 16.1 parts per printer per day). Layout options (rows, printers per arm) are compared in [docs/layout.md](docs/layout.md).
@@ -117,7 +117,7 @@ box goes to the sealer and its carrier lane. One box and one tote at a time, so 
 | Large parts, bed to tray (20 plates per row, realistic) | 40/40 placed (row A 20/20, row B 20/20) |
 | Station bench (realistic): packages boxed, parts in the right box | 53/53 boxes complete, 151 parts, 0 missing, 0 operator calls, 0 robot-station contacts |
 | Robot time at the station per package (measured) | 20 s (sd 7 s, n = 53) |
-| Partial packages handed to an operator, per week (DES) | 0.8 (small parts only; 40 with first-in-first-out printing), 1.0 with large parts in the mix |
+| Partial packages handed to an operator, per week (DES) | 1.2 (small parts only; 39 with first-in-first-out printing), 1.0 with large parts in the mix |
 
 The last row is a scheduling result: printing a package's parts on as few plates as possible keeps its tote from
 waiting hours for a fragment printed elsewhere (`fleet/queue_policy.py`).
@@ -240,6 +240,9 @@ LeRobot or torch on the Pi), `real/arm_server.py` runs the motion loop on the Pi
 a watchdog, and the laptop plans and sends targets over the network (`--arm remote://<pi>:8765`). A step-by-step
 bring-up guide is in [real/DEMO_DAY.md](real/DEMO_DAY.md).
 
+**Real 3D models**: STL / 3MF files go through a real slicer (BambuStudio's command line), the G-code parser and into
+the simulated cell as mesh parts; how the robot unloads them is in [docs/real_models.md](docs/real_models.md).
+
 Everything in `real/` is tested against mock printers (`real/tests`, no hardware needed):
 `python -m real.run_demo --mock --dry-run --sim-preview` rehearses the whole run.
 
@@ -258,7 +261,7 @@ Everything in `real/` is tested against mock printers (`real/tests`, no hardware
 | `scripts/` | runnable experiments: single-skill tests, batch evaluation, layout studies, rendering |
 | `real/` | hardware toolkit: printer backends, G-code parts, calibration, SO-101 kinematics and driver |
 | `tests/`, `real/tests/` | unit tests (run in CI) |
-| `docs/` | [architecture](docs/architecture.md), [results](docs/results.md), [sim2real](docs/sim2real.md), [door](docs/door.md), [perception](docs/perception.md), [layout](docs/layout.md), [station](docs/station.md) |
+| `docs/` | [architecture](docs/architecture.md), [results](docs/results.md), [sim2real](docs/sim2real.md), [door](docs/door.md), [perception](docs/perception.md), [layout](docs/layout.md), [station](docs/station.md), [real models](docs/real_models.md) |
 
 ## Roadmap
 

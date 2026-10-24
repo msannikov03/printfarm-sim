@@ -376,7 +376,7 @@ class BedCamera:
                 dark_bodies.append(b)
         if not dark_bodies:
             return np.zeros((H, W), bool)
-        body = np.where(gid >= 0, self.w.m.geom_bodyid[np.clip(gid, 0, None)], -1)
+        body = np.where(gid >= 0, self.w.m.body_rootid[self.w.m.geom_bodyid[np.clip(gid, 0, None)]], -1)
         return np.isin(body, dark_bodies)
 
     def sigma_z_eff_mm(self, z_m):
@@ -609,11 +609,9 @@ def _estimate_legacy(points, objects):
                 dyaw = (cand - o["yaw_deg"] + period / 2) % period - period / 2
                 if abs(dyaw) <= MAX_YAW_CORR_DEG:          # prints only rotate a little: larger = misfit
                     yaw = o["yaw_deg"] + dyaw
-        if o["sku"] in C.CATALOG and C.CATALOG[o["sku"]].kind == "L":
-            ln, wd, bt, uh, ut = C.CATALOG[o["sku"]].dims     # top face = the upright: shift to the footprint centre
-            yr = math.radians(yaw)
-            off = -ln / 2 + ut / 2
-            c = c - off * np.array([math.cos(yr), math.sin(yr)])
+        off = _top_offset(o)       # top face off the footprint centre (L bracket's upright, a real part's top)
+        if off is not None:
+            c = c - _rot2(yaw) @ off
         est[o["name"]] = {"found": True, "n_top": int(len(top)), "center_mm": [float(c[0]), float(c[1])],
                           "yaw_deg": float(yaw)}
     unknown = int((~explained).sum())
@@ -630,13 +628,27 @@ def _yaw_observable(o):
     return k.kind == "box" and abs(k.dims[0] - k.dims[1]) > 0.12 * max(k.dims[0], k.dims[1])
 
 
-def _lever_mm(o):
-    """Distance from the measured top face to the footprint centre (only the L bracket's upright is off-centre)."""
+def _top_offset(o):
+    """Centre of the top face relative to the footprint centre, in the part frame (mm), or None if they coincide:
+    the L bracket's upright, or a real part's top face (SKU.top_mm, from its mesh)."""
     k = C.CATALOG.get(o["sku"])
     if k is not None and k.kind == "L":
         ln, wd, bt, uh, ut = k.dims
-        return abs(-ln / 2 + ut / 2)
-    return 0.0
+        return np.array([-ln / 2 + ut / 2, 0.0])
+    if k is not None and k.top_mm and math.hypot(k.top_mm[2], k.top_mm[3]) > 0.05:
+        return np.array(k.top_mm[2:4], float)
+    return None
+
+
+def _rot2(yaw_deg):
+    c, s = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
+    return np.array([[c, -s], [s, c]])
+
+
+def _lever_mm(o):
+    """Distance from the measured top face to the footprint centre (the L bracket's upright, a real part's top)."""
+    off = _top_offset(o)
+    return 0.0 if off is None else float(np.hypot(*off))
 
 
 def _decorate(e, o, cov, yaw_sig, quality, observed=True, prior_rejected=False):
@@ -656,12 +668,16 @@ def _top_dims(o):
         return float(fx), float(fy)
     if k.kind == "L":
         return float(k.dims[4]), float(k.dims[1])
+    if k.top_mm:                                   # a real part: its top face, from the mesh
+        return max(float(k.top_mm[0]), 1.0), max(float(k.top_mm[1]), 1.0)
     return float(k.footprint[0]), float(k.footprint[1])
 
 
 def _top_area(o):
     k = C.CATALOG.get(o["sku"])
     tx, ty = _top_dims(o)
+    if k is not None and len(k.top_mm) > 4:          # a real part's top face (a rim is far less than its extent)
+        return max(float(k.top_mm[4]), 1.0)
     return math.pi * tx * tx / 4 if (k is not None and k.kind == "cyl") else tx * ty
 
 
@@ -816,6 +832,8 @@ def _estimate_robust(points, objects, meta):
         yr = math.radians(o["yaw_deg"])
         dx, dy = raised[:, 0] - cx, raised[:, 1] - cy
         near = footprint(o, raised, FOOT_MARGIN_MM)
+        if len(objects) > 1:  # a neighbour within the search margin (a slicer's own arrange packs parts a few mm apart):
+            near &= ~np.any([footprint(o2, raised, 1.0) for o2 in objects if o2 is not o], axis=0)   # not ours
         if _large(o):        # the far end of a long part is noisier than its centre: a band from each point's own sigma
             band = np.abs(raised[:, 2] - h) < np.maximum(TOP_TOL_MM, 3.0 * point_sigma_mm(raised, meta))
         else:
@@ -879,8 +897,8 @@ def _estimate_robust(points, objects, meta):
             c = np.array([rx, ry])
             if abs(w_ - h_) > 0.12 * max(w_, h_):
                 long_ang = ang if w_ >= h_ else ang + 90.0
-                k = C.CATALOG.get(o["sku"])
-                long_is_x = k is None or k.footprint[0] >= k.footprint[1]
+                tdx, tdy = _top_dims(o)
+                long_is_x = tdx >= tdy
                 cand = long_ang - (0.0 if long_is_x else 90.0)
                 dyaw = (cand - o["yaw_deg"] + period / 2) % period - period / 2
                 if abs(dyaw) <= MAX_YAW_CORR_DEG:
@@ -929,10 +947,8 @@ def _estimate_robust(points, objects, meta):
         else:
             ys = PRIOR_YAW_SIGMA_DEG
         lev = _lever_mm(o)
-        if lev:
-            yr2 = math.radians(yaw)
-            off = -(k.dims[0] / 2) + k.dims[4] / 2
-            c = c - off * np.array([math.cos(yr2), math.sin(yr2)])
+        if lev:                    # the top face is off the footprint centre: shift by it at the estimated yaw
+            c = c - _rot2(yaw) @ _top_offset(o)
             var_c += (lev * math.radians(ys)) ** 2
         cov_c = np.eye(2) * var_c
         cov_p = np.eye(2) * PRIOR_SIGMA_MM ** 2
@@ -1038,7 +1054,9 @@ def plate_objects(plate):
     """Slicer prior for perception: plate objects + the purge tab, with known heights and local footprints."""
     objs = [dict(o, height_mm=C.CATALOG[o["sku"]].height, footprint_mm=C.CATALOG[o["sku"]].footprint)
             for o in plate["objects"]]
-    pt = plate["purge_tab"]
+    pt = plate.get("purge_tab")
+    if pt is None:                                 # no tab on this plate (e.g. a Bambu printer: it purges into a chute)
+        return objs
     objs.append({"name": f"{plate['plate_id']}_purge_tab", "sku": "purge_tab", "center_mm": pt["center_mm"],
                  "yaw_deg": 0.0, "height_mm": float(pt["dims_mm"][2]), "footprint_mm": tuple(pt["dims_mm"][:2])})
     return objs

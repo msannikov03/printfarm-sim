@@ -18,7 +18,7 @@ python scripts/fill_results.py --lint                                    # nothi
 
 The one-row batches (`IDEAL_*`, `REAL_*`, `HARSH_*`, `FAULT_*`) were measured before the carriage moves changed to
 "fold only when needed" ([door.md](door.md)); that change affects only how the arm rides the rail between steps.
-The two-row batches and the farm run use the current code.
+The two-row batches, the DES timings made from them (`runs/timings.json`) and the farm run use the current code.
 
 | Placeholders | Command | Read from |
 |---|---|---|
@@ -64,9 +64,9 @@ Ground-truth poses are used only to compute these errors. The planners never see
 
 | Placeholders | Command | Read from |
 |---|---|---|
-| `DES_*` | `python scripts/make_timings.py runs/two_rows/eval_both && python -m fleet.des --compare --days 7 --seeds 5 --skus small --out runs/des_final/small` (`eval_both` = the seed files of `eval_p4` and `eval_p14` in one directory, 40 plates; station steps from `runs/station_times.json`) | `runs/des_final/small/kpis_compare.json`: `runs.order_aware.mean` vs `runs.human.mean` (5 seeds) |
-| `SENS_*` | `python scripts/des_sensitivity.py runs/final/realistic_faults --skus small --out runs/des_final/sensitivity.json`, copied next to `kpis_compare.json` | `sensitivity.json` rows vs its own human row, in parts per printer per day |
-| `DES_ALL_*` | `python -m fleet.des --policy order_aware --skus all --order-scale 1.48 --seed S --out runs/des_final/all148/order_aware_sS` and `--policy human`, S = 0..4 (order rate 1.48 instead of 2 keeps the print load equal to the small mix: large parts add about 35 % print volume per order) | mean of `kpis.json` over the 5 seeds (`runs/des_final/all148/summary.txt`), set by hand |
+| `DES_*` | `python scripts/make_timings.py runs/two_rows_v4/eval_both && python -m fleet.des --compare --days 7 --seeds 5 --skus small --out runs/des_v4/small` (`eval_both` = the seed files of `two_rows_v4/eval_p4` and `eval_p14` in one directory, 40 plates, current motion code; station steps from `runs/station_times.json`) | `runs/des_v4/small/kpis_compare.json`: `runs.order_aware.mean` vs `runs.human.mean` (5 seeds) |
+| `SENS_*` | `python scripts/des_sensitivity.py runs/final/realistic_faults --skus small --out runs/des_v4/sensitivity.json`, copied next to `kpis_compare.json` | `sensitivity.json` rows vs its own human row, in parts per printer per day |
+| `DES_ALL_*` | `python -m fleet.des --policy order_aware --skus all --order-scale 1.48 --seed S --out runs/des_v4/all148/order_aware_sS` and `--policy human`, S = 0..4 (order rate 1.48 instead of 2 keeps the print load equal to the small mix: large parts add about 35 % print volume per order) | mean of `kpis.json` over the 5 seeds (`runs/des_v4/all148/summary.txt`), set by hand |
 
 - `DES_UTIL_*`: `printer_util_pct`, the share of time printers spend printing.
 - `DES_PPD_*`: `parts_per_day`.
@@ -79,7 +79,11 @@ Ground-truth poses are used only to compute these errors. The planners never see
   that baseline, and its output against the human's.
 - `scripts/fill_results.py` computes all three from `sensitivity.json`.
 - The DES uses the measured timings in `runs/timings.json`. Every other rate (orders, print times, cooling, operator
-  shifts) is an assumption, listed in `fleet/des.py` `Params`.
+  shifts) is an assumption, listed in `fleet/des.py` `Params`. Carriage moves during an unload (door, picks, drops)
+  are inside the measured step times; drives between printers and to the station are distance over `rail_speed_mps`,
+  without the arm's fold before a drive.
+- Gantt chart, KPI comparison and the payback estimate: `python -m report.plots --des runs/des_v4/small --out
+  runs/des_v4/plots` (every money figure is an assumption, `report/plots.py` `ECON`).
 
 ## Whole cell
 
@@ -104,7 +108,7 @@ Ground-truth poses are used only to compute these errors. The planners never see
 | `BOX_LARGE` | `python scripts/eval_unload.py --n 20 --realism realistic --skus mixed --printer 4 --out runs/verify_v4/mixed_p4` (row A) / `--printer 14 --out runs/verify_v4/mixed_p14` (row B); plates are packed with the farm's 3 h cap | `summary.json` `by_size.large`: `truly_placed / parts` |
 | `BOX_BENCH` | `python scripts/run_farm.py --station-bench 12 --realism realistic --out runs/station_bench` (station only: random orders, parts spawned into the totes and the tray) | `runs/station_bench/summary_s0.json` `station.stats`, set by hand |
 | `BOX_STATION_S` | the same bench with `--times runs/station_times.json` | `runs/station_times.json` `package`: robot-blocking time per package (box request, large-part places, tote dump and camera check; sealing runs in the background) |
-| `BOX_PARKS` | `python -m fleet.des --compare --days 7 --seeds 5 --skus small --queue-policy fifo` vs `--queue-policy package`; with large parts the `DES_ALL_*` runs | `partial_handoffs` per week (an incomplete package's tote or tray slot handed to the station's consolidation shelf, i.e. an operator task): `runs/des_box_pkg/queue_policy.json` (small mix) and `runs/des_final/all148/summary.txt`, set by hand |
+| `BOX_PARKS` | `python -m fleet.des --compare --days 7 --seeds 5 --skus small --queue-policy fifo --out runs/des_v4/small_fifo` vs the `DES_*` run (`--queue-policy package`, the default); with large parts the `DES_ALL_*` runs | `partial_handoffs` per week (an incomplete package's tote or tray slot handed to the station's consolidation shelf, i.e. an operator task), `order_aware` mean: collected in `runs/des_v4/queue_policy.json` (small mix) and `runs/des_v4/all148/summary.txt`, set by hand |
 | `BOX_TOTE_MAX` | `farm.catalog.TOTE_MAX_PARTS` | set by hand |
 
 - "Large parts" are the housing, the plate and the bar (`farm.catalog.LARGE_SKUS`). Bed to tray is ground truth: the

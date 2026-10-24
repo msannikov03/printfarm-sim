@@ -86,7 +86,7 @@ the robot reported a failure). What the failures are:
 ## Door (`scripts/test_door.py --all`, `scripts/door_robustness.py`)
 
 Physical jaw grasp, no rigid lock. Single-row cell: 10/10 printers open and 10/10 close (20.9 s / 21.0 s). Two-row
-cell: 40/40 opened and 40/40 closed in the realistic batches of both rows (23.2 s / 21.1 s, `runs/timings.json`),
+cell: 40/40 opened and 40/40 closed in the realistic batches of both rows (22.5 s / 20.8 s, `runs/timings.json`),
 and every door of the fresh two-row batches above opened and closed. Single-row sweeps: robust to catch forces of
 0-54 N, hinge friction and damping, door sag, 2x swing speed and printer placement error up to +-10 mm / +-2 deg
 (20/20). Measured coupling loads give the grip spec for a real gripper: closing force >= catch force + 1.5 N (25 N with

@@ -1,12 +1,12 @@
 {
- "source": "MuJoCo batch runs/two_rows_v3/eval_both (40 plates, 200 parts)",
+ "source": "MuJoCo batch runs/two_rows_v4/eval_both (40 plates, 200 parts)",
  "rail_speed_mps": 0.4,
- "door_open_s": 23.275499999997756,
- "door_close_s": 21.261000000029135,
+ "door_open_s": 22.491999999998193,
+ "door_close_s": 20.80025000002617,
  "scan_s": 2.0,
- "purge_tab_s": 17.82425,
- "pick_place_s_mean": 19.861949685534594,
- "pick_place_s_std": 4.748054547379361,
+ "purge_tab_s": 17.7195,
+ "pick_place_s_mean": 20.050314465408807,
+ "pick_place_s_std": 4.460613295309726,
  "bed_check_s": 2.0,
  "station_handoff_s": 6.0,
  "retry_s": 8.0,
@@ -18,7 +18,7 @@
  "realism": [
   "realistic"
  ],
- "rake_s": 18.25,
+ "rake_s": 17.73,
  "door_ok_rate": 1.0,
  "outcomes": {
   "not_in_bin": 1,

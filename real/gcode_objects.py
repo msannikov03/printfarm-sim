@@ -4,6 +4,8 @@ Two paths:
   1. Labelled objects (preferred). Recognised labels, in priority order:
        - Klipper exclude-object: EXCLUDE_OBJECT_DEFINE NAME=.. CENTER=x,y POLYGON=[[x,y],..]
          + EXCLUDE_OBJECT_START/END NAME=..   (Orca / Creality Print "Exclude objects", Klipper flavour)
+       - BambuStudio: "; start printing object, unique label id: N" ... "; stop printing object, unique label id: N"
+         (always on); the id -> object name map is in the plate archive's Metadata/slice_info.config
        - "; printing object NAME" ... "; stop printing object NAME"
          (Orca / Creality Print / PrusaSlicer "Label objects")
        - Marlin "M486 S<id> [A<name>]" ... "M486 S-1"   (slicer "firmware-specific" labels for Marlin)
@@ -14,7 +16,8 @@ Two paths:
      connected components = parts; each part's height = max Z of extrusions over its footprint.
 
 Purge / prime lines and skirts are excluded: moves before the first layer marker (start G-code),
-moves commented purge/prime/intro/wipe, ;TYPE:Skirt / prime tower, and geometrically thin lines.
+moves commented purge/prime/intro/wipe, ;TYPE:Skirt / prime tower (Bambu: "; FEATURE: Skirt"), and geometrically
+thin lines. A brim stays with its object: it is printed fused to the part and comes off the bed with it.
 
 Purge tab (docs/purge.md): a small printed object the start G-code primes into, picked first into the waste bin
 with the prime line fused to it. It is the object named like one (PURGE_OBJECT, e.g. EXCLUDE_OBJECT_DEFINE
@@ -29,6 +32,7 @@ CLI:  python -m real.gcode_objects plate.gcode [--bed 220x220] [--robot-side fro
 from __future__ import annotations
 
 import argparse
+import html
 import io
 import json
 import math
@@ -86,6 +90,28 @@ def read_gcode_text(path: str | Path) -> str:
     return path.read_text(errors="replace")
 
 
+def read_label_names(path: str | Path) -> dict:
+    """BambuStudio plate archive (.gcode.3mf): G-code label id -> object name, from Metadata/slice_info.config
+    ("<object identify_id=.. name=..>"). Names that occur twice get "#<id>" appended. {} for anything else."""
+    path = Path(path)
+    if not zipfile.is_zipfile(path):
+        return {}
+    with zipfile.ZipFile(path) as z:
+        cfg = [n for n in z.namelist() if n.lower().endswith("slice_info.config")]
+        if not cfg:
+            return {}
+        text = z.read(cfg[0]).decode("utf-8", "replace")
+    pairs = []
+    for tag in re.findall(r"<object\b[^>]*>", text):
+        i, n = re.search(r'identify_id="(\d+)"', tag), re.search(r'name="([^"]*)"', tag)
+        if i:
+            pairs.append((int(i.group(1)), html.unescape(n.group(1)) if n else f"object_{i.group(1)}"))
+    count = {}
+    for _, n in pairs:
+        count[n] = count.get(n, 0) + 1
+    return {i: (n if count[n] == 1 else f"{n}#{i}") for i, n in pairs}
+
+
 def _arc_points(x0, y0, x1, y1, i, j, cw: bool, step_mm: float = 2.0):
     cx, cy = x0 + i, y0 + j
     r = math.hypot(i, j)
@@ -107,7 +133,7 @@ def parse_segments(text: str) -> Segments:
     scale = 1.0
     in_start = True
     has_layers = False
-    cur = {"exclude": None, "comment": None, "m486": None, "mesh": None}
+    cur = {"exclude": None, "bambu": None, "comment": None, "m486": None, "mesh": None}
     m486_names, m486_id = {}, -1
     in_flush = False
     cur_type = ""
@@ -136,7 +162,9 @@ def parse_segments(text: str) -> Segments:
             if LAYER_MARK.match(line):
                 in_start, has_layers = False, True
             elif m := re.match(r";\s*start printing object, unique label id:\s*(\d+)", line, re.I):
-                cur["comment"] = f"id_{m.group(1)}"                  # BambuStudio / newer Orca style
+                cur["bambu"] = f"id_{m.group(1)}"                    # BambuStudio / newer Orca style
+            elif re.match(r";\s*stop printing object, unique label id:", line, re.I):
+                cur["bambu"] = None
             elif m := re.match(r";\s*printing object\s+(.+?)\s*$", line, re.I):
                 cur["comment"] = re.sub(r"\s+id:\d+\s+copy\s+\d+$", "", m.group(1))
             elif re.match(r";\s*stop printing object", line, re.I):
@@ -148,14 +176,14 @@ def parse_segments(text: str) -> Segments:
                 in_flush = True
             elif re.match(r";\s*FLUSH_END", line, re.I):
                 in_flush = False
-            elif m := re.match(r";\s*TYPE:\s*(.*)$", line, re.I):
+            elif m := re.match(r";\s*(?:TYPE|FEATURE):\s*(.*)$", line, re.I):   # Bambu: "; FEATURE: Skirt"
                 cur_type = m.group(1)
             elif m := re.match(r";\s*([A-Za-z_][\w ]*?)\s*[=:]\s*(.+)$", line):
                 key = m.group(1).strip().lower().replace(" ", "_")
                 if key in ("printable_area", "bed_shape", "printable_height", "max_z_height", "machine_name",
                            "printer_model", "printer_settings_id", "flavor", "exclude_object",
                            "gcode_label_objects", "label_objects", "machine_width", "machine_depth",
-                           "bed_size"):
+                           "bed_size", "extruder_offset"):
                     header.setdefault(key, m.group(2).strip())
             continue
         up = code.upper()
@@ -229,7 +257,7 @@ def parse_segments(text: str) -> Segments:
                 de = args["E"] - e if abs_e else args["E"]
                 e = args["E"] if abs_e else e + args["E"]
             moved = abs(nx - x) > 1e-6 or abs(ny - y) > 1e-6
-            if de > 1e-6 and moved and g != "G0":
+            if de > 1e-6 and moved:                         # (G0 with E extrudes too: Bambu primes with "G0 X240 E15")
                 purge = in_flush or bool(PURGE_WORDS.search(cl))
                 if g in ("G2", "G3") and ("I" in args or "J" in args):
                     pts = _arc_points(x, y, nx, ny, args.get("I", 0.0) * scale, args.get("J", 0.0) * scale, g == "G2")
@@ -322,7 +350,7 @@ def _usable(seg: Segments, use_start: bool = False) -> np.ndarray:
 
 def labelled_objects(seg: Segments) -> tuple[str | None, list[dict]]:
     ok = _usable(seg)
-    for scheme in ("exclude", "comment", "m486", "mesh"):
+    for scheme in ("exclude", "bambu", "comment", "m486", "mesh"):
         lab = seg.labels[scheme]
         names = [n for n in dict.fromkeys(lab[ok]) if n is not None]
         if scheme == "exclude" and not names and seg.defines:
@@ -345,7 +373,7 @@ def labelled_objects(seg: Segments) -> tuple[str | None, list[dict]]:
             if "center" in d:
                 o["define_center_mm"] = d["center"]
             objs.append(o)
-        return {"exclude": "exclude_object", "comment": "printing_object", "m486": "m486",
+        return {"exclude": "exclude_object", "bambu": "bambu_label", "comment": "printing_object", "m486": "m486",
                 "mesh": "cura_mesh"}[scheme], objs
     return None, []
 
@@ -522,6 +550,11 @@ def extract(path=None, *, text=None, bed=None, printer_model=None, robot_side="f
     seg = parse_segments(text if text is not None else read_gcode_text(path))
     bw, bh, bsrc = bed_size(seg, bed, printer_model)
     method, objs = (None, []) if force_cluster else labelled_objects(seg)
+    if method == "bambu_label":                  # "id_N" -> the object's name from the plate archive, when it has one
+        names = read_label_names(path) if path is not None else {}
+        for o in objs:
+            o["label_id"] = int(o["name"][3:])
+            o["name"] = names.get(o["label_id"], o["name"])
     excluded = []
     if not objs:
         objs, excluded = cluster_objects(seg, bed=(bw, bh))

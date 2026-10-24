@@ -419,6 +419,16 @@ def _part_body(name, sku, park_xyz):
     s = C.CATALOG[sku] if sku != "purge_tab" else None
     geoms = []
     cls = 'class="part"'
+    if s is not None and s.col_meshes:
+        # real part: convex collision pieces (group 3, hidden from the cameras, like the arm's collision capsules) and
+        # the true mesh as a visual-only child body (no contacts; the chamber / wrist cameras render it)
+        geoms = [f'<geom type="mesh" mesh="{sku}_c{k}" material="pla" group="3" {cls}/>' for k in range(len(s.col_meshes))]
+        mass = max(s.mass_g, 1.0) / 1000
+        vis = (f'<body name="{name}_vis"><inertial pos="0 0 0" mass="1e-6" diaginertia="1e-12 1e-12 1e-12"/>'
+               f'<geom type="mesh" mesh="{sku}_v" material="pla" contype="0" conaffinity="0" group="1"/></body>')
+        return (f'<body name="{name}" pos="{_f(*park_xyz)}"><freejoint name="{name}"/>'
+                f'<inertial pos="0 0 {s.height / 3000:.4f}" mass="{mass:.4f}" diaginertia="2e-6 2e-6 2e-6"/>'
+                + "".join(geoms) + vis + '</body>')
     if sku == "purge_tab":
         # body origin = the grab tab (C.PURGE_TAB_MM); the prime line (C.PURGE_LINE_MM) runs off its +x face along
         # the front strip. One rigid body: lifting the tab takes the line with it
@@ -444,9 +454,23 @@ def _part_body(name, sku, park_xyz):
 
 def part_pool():
     """Names of pooled part bodies: [(body_name, sku)]."""
-    pool = [(f"{sku}_{k}", sku) for sku in C.CATALOG for k in range(POOL_PER_SKU)]
+    pool = [(f"{sku}_{k}", sku) for sku, s in C.CATALOG.items() for k in range(s.pool or POOL_PER_SKU)]
     pool += [(f"purge_tab_{k}", "purge_tab") for k in range(N_PURGE)]
     return pool
+
+
+def _part_mesh_assets():
+    """Mesh assets of the real-part SKUs (C.SKU.col_meshes / vis_mesh): one vertex-only mesh per convex collision piece
+    (MuJoCo collides with its convex hull) and the visual STL (shell inertia: it carries no mass)."""
+    out = []
+    for sku, s in C.CATALOG.items():
+        for k, verts in enumerate(s.col_meshes):
+            v = " ".join(f"{x / 1000:.6f}" for p in verts for x in p)
+            out.append(f'<mesh name="{sku}_c{k}" vertex="{v}"/>')
+        if s.col_meshes:
+            out.append(f'<mesh name="{sku}_v" file="{pathlib.Path(s.vis_mesh).resolve().as_posix()}" '
+                       f'scale="0.001 0.001 0.001" inertia="shell"/>')
+    return "".join(out)
 
 
 def _station():
@@ -495,7 +519,7 @@ def build_xml(rail_x0=1.2):
     return f"""<mujoco model="printpick_farm">
   <compiler angle="radian" meshdir="{(YAM_DIR / 'assets').as_posix()}" autolimits="true"/>
   <option timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="10" noslip_iterations="2"/>
-  <size memory="200M"/>
+  <size memory="{200 + 10 * sum(len(s.col_meshes) for s in C.CATALOG.values())}M"/>
   <visual>
     <global offwidth="1920" offheight="1080" azimuth="135" elevation="-25"/>
     <quality shadowsize="4096" offsamples="8"/>
@@ -504,7 +528,7 @@ def build_xml(rail_x0=1.2):
   </visual>
   {default}
   <asset>
-    {yam_assets}
+    {yam_assets}{_part_mesh_assets()}
     <texture name="floor" type="2d" builtin="checker" rgb1="0.78 0.79 0.8" rgb2="0.74 0.75 0.76" width="512" height="512"/>
     <texture name="sky" type="skybox" builtin="gradient" rgb1="0.95 0.96 0.97" rgb2="0.82 0.84 0.87" width="512" height="512"/>
     <material name="floor" texture="floor" texrepeat="8 8" reflectance="0.08"/>

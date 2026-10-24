@@ -75,7 +75,9 @@ def spawn_plate(w, plate, rng=None, pos_sigma_mm=0.0, yaw_sigma_deg=0.0, stuck=T
         w.spawn(body, C.bed_mm_to_world(i, o["center_mm"][0] + dx, o["center_mm"][1] + dy), yaw + (0 if s > 0 else math.pi),
                 stuck=stuck)
         placed[o["name"]] = body
-    pt = plate["purge_tab"]
+    pt = plate.get("purge_tab")
+    if pt is None:                       # no purge tab on this plate (a Bambu printer purges into its chute)
+        return placed
     body = w.free_part("purge_tab")
     w.spawn(body, C.bed_mm_to_world(i, *pt["center_mm"]), 0.0 if s > 0 else math.pi, stuck=stuck)
     placed[f"{plate['plate_id']}_purge_tab"] = body
@@ -137,6 +139,10 @@ def grasp_spec(w, body, est=None, i=None):
         return p, [(R[:, 0], ut), (R[:, 1], wd)], [uh * 0.7, uh - 0.004]
     fx, fy, h = d
     opts = sorted([(R[:, 0], fx), (R[:, 1], fy)], key=lambda o: o[1])
+    if k.grasp_mm:                       # a real part: where its cross-section at the grasp heights is (an upright, a
+        cx, cy, wx, wy = (v / 1000 for v in k.grasp_mm)   # boss), not the footprint centre: that may be air
+        pos = pos + R @ np.array([cx, cy, 0.0])
+        opts = sorted([(R[:, 0], wx), (R[:, 1], wy)], key=lambda o: o[1])
     hs = [h * 0.6, max(h - 0.004, 0.005)] + ([h - 0.0025] if k.large else [])   # a low large part: high in its top
     return pos, [o for o in opts if o[1] <= gmax], hs                           # edge, so a moderate tilt reaches
 
@@ -878,6 +884,8 @@ def top_center(w, body, pos, R):
     if k.kind == "L":
         ln, wd, bt, uh, ut = (v / 1000 for v in k.dims)
         return pos + R @ np.array([-ln / 2 + ut / 2, 0, 0]), uh
+    if k.top_mm:                         # a real part: the top face from its mesh
+        return pos + R @ np.array([k.top_mm[2] / 1000, k.top_mm[3] / 1000, 0.0]), k.height / 1000
     return pos.copy(), k.height / 1000
 
 
@@ -918,7 +926,8 @@ def wrist_offset(ex, ik, w, i, body, est, verbose=False):
     uv = (pw[near, :2] - top[:2]) @ R[:2, :2]
     lo_, hi_ = np.percentile(uv, 1, axis=0), np.percentile(uv, 99, axis=0)
     k = C.CATALOG.get(sku)
-    dims = np.array((k.dims[4], k.dims[1]) if k is not None and k.kind == "L" else (fx, fy)) / 1000
+    dims = np.array((k.dims[4], k.dims[1]) if k is not None and k.kind == "L" else
+                    (max(k.top_mm[0], 1.0), max(k.top_mm[1], 1.0)) if k is not None and k.top_mm else (fx, fy)) / 1000
     if large:     # the wrist sees only part of a long top face: correct across it (the jaw axis) only
         lo_[0], hi_[0], dims[0] = -dims[0] / 2, dims[0] / 2, dims[0]
     if np.any(hi_ - lo_ < 0.75 * dims) or np.any(hi_ - lo_ > dims + 0.006):
