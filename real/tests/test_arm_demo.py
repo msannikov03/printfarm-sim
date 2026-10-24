@@ -189,6 +189,23 @@ def test_run_demo_mock_dry_run(tmp_path, kind, style):
     assert log["plan"]["pick_order"] == [r["name"] for r in log["results"]]
 
 
+def test_run_demo_purge_tab_lowers_hover(tmp_path):
+    """The purge tab (docs/purge.md) stands at the front edge, close to the arm: out of reach at the default 40 mm
+    hover with the nominal placement, so the planner retries lower and every object stays reachable."""
+    from real.run_demo import HOVER_MIN_MM, main
+    from real.synth_gcode import SynthOpts, make_gcode
+    g = tmp_path / "tab.gcode"
+    g.write_text(make_gcode(opts=SynthOpts(purge_tab=True)))
+    rep = main(["--gcode", str(g), "--dry-run", "--runs-dir", str(tmp_path), "--calib", str(tmp_path / "none.json")])
+    rows = {r["name"]: r for r in rep["results"]}
+    assert rep["results"][0]["name"] == "purge_tab"
+    assert all(r["status"] == "dry-run ok" for r in rep["results"])
+    tab = rows["purge_tab"]
+    assert HOVER_MIN_MM <= tab["hover_mm"] < 40
+    assert tab["reached_bed_mm"][2] == pytest.approx(tab["height_mm"] + tab["hover_mm"], abs=1.5)
+    assert all(r["hover_mm"] == 40 for n, r in rows.items() if n != "purge_tab")
+
+
 def test_run_demo_preview_renders(tmp_path):
     from real.run_demo import main
     from real.synth_gcode import SynthOpts, make_gcode

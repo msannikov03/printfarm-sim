@@ -33,6 +33,8 @@ from real.so101 import FIXED_TIP, SO101, hover_tcp, pinch
 
 log = logging.getLogger("real.demo")
 TRANSIT_MM = 60.0          # clearance above the tallest part for moves between parts
+HOVER_MIN_MM = 20.0        # a hover out of reach is retried this low, in HOVER_STEP_MM steps: a tall part near the
+HOVER_STEP_MM = 5.0        # base (the purge tab on the front strip, docs/purge.md) is reachable only a little lower
 READY_TIP_M = (0.15, 0.0, 0.20)   # 'ready' pose: jaws pointing down, 15 cm in front of the base, 20 cm up
 
 
@@ -61,7 +63,8 @@ def parts_clearance_check(kin: SO101, calib: BedCalib, objects, margin_mm=8.0, r
 
 
 def hover_plan(kin: SO101, calib: BedCalib, plan: dict, hover_mm: float, q_start, align_jaws=True):
-    """For each object in pick order: transit pose (above the tallest part) + hover pose. IK only."""
+    """For each object in pick order: transit pose (above the tallest part) + hover pose. IK only. A hover out of
+    reach is retried lower (HOVER_STEP_MM steps, down to HOVER_MIN_MM); the step's "hover_mm" is the height used."""
     by = {o["name"]: o for o in plan["objects"]}
     hmax = max([o.get("height_mm") or 0.0 for o in plan["objects"]] + [0.0])
     steps, q = [], np.array(q_start, float)
@@ -72,18 +75,26 @@ def hover_plan(kin: SO101, calib: BedCalib, plan: dict, hover_mm: float, q_start
         th = math.radians(o["yaw_deg"] + 90.0)
         jaw = calib.bed_dir_to_robot([math.cos(th), math.sin(th)]) if align_jaws else None
         h = o.get("height_mm") or 0.0
-        hover = calib.bed_to_robot([*o["center_mm"], h + hover_mm])
-        transit = calib.bed_to_robot([*o["center_mm"], max(hmax + TRANSIT_MM, h + hover_mm)])
-        rt = kin.solve_hover(transit, jaw=jaw, tcp=tcp, q0=q)
         grip = kin.gripper_for_opening(min(width + 20.0, 90.0))      # jaws open: part width + 20 mm
-        rh = kin.solve_hover(hover, jaw=jaw, tcp=tcp, q0=rt.q if rt.ok else q)
+        tries = [hover_mm] + list(np.arange(hover_mm - HOVER_STEP_MM, HOVER_MIN_MM - 1e-6, -HOVER_STEP_MM))
+        first = None
+        for hv in tries:
+            hover = calib.bed_to_robot([*o["center_mm"], h + hv])
+            transit = calib.bed_to_robot([*o["center_mm"], max(hmax + TRANSIT_MM, h + hv)])
+            rt = kin.solve_hover(transit, jaw=jaw, tcp=tcp, q0=q)
+            rh = kin.solve_hover(hover, jaw=jaw, tcp=tcp, q0=rt.q if rt.ok else q)
+            first = first or (hv, hover, transit, rt, rh)
+            if rh.ok:
+                break
+        else:                          # out of reach at every height: report it at the requested one
+            hv, hover, transit, rt, rh = first
         if rh.ok and rh.pitch_deg is not None and abs((rt.pitch_deg or 0) - rh.pitch_deg) > 1e-6:
             # keep the transit pose at the same tilt as the hover so the final descent is straight
             rt2 = kin.solve_hover(transit, jaw=jaw, tcp=tcp, q0=rh.q, pitches=(rh.pitch_deg,))
             rt = rt2 if rt2.ok else rt
         rt.q[5] = rh.q[5] = grip
         steps.append(dict(name=name, obj=o, hover_robot=hover, transit_robot=transit, tcp=tcp, ik_transit=rt,
-                          ik_hover=rh))
+                          ik_hover=rh, hover_mm=float(hv)))
         if rh.ok:
             q = rh.q
     return steps
@@ -328,7 +339,7 @@ def main(argv=None):
                        pitch_deg=rh.pitch_deg, pos_err_mm=round(rh.pos_err_mm, 2), ang_err_deg=round(rh.ang_err_deg, 2),
                        q_model_deg=np.degrees(rh.q).round(2).tolist(), lerobot=arm.jm.model_to_lerobot(rh.q),
                        q_transit_deg=np.degrees(rt.q).round(2).tolist() if rt.ok else None,
-                       reached_bed_mm=np.round(hb, 1).tolist())
+                       reached_bed_mm=np.round(hb, 1).tolist(), hover_mm=s["hover_mm"])
             tag = (f"{i}. {s['name']:<16} bed ({o['center_mm'][0]:.0f},{o['center_mm'][1]:.0f}) h={o.get('height_mm') or 0:.0f}"
                    f" -> robot {np.round(s['hover_robot'] * 1000).astype(int).tolist()} mm")
             if not rh.ok:
@@ -336,7 +347,8 @@ def main(argv=None):
                 print(f"   {tag}: UNREACHABLE (best pos err {rh.pos_err_mm:.0f} mm) - move the arm closer / re-plan")
             else:
                 ori = "down" if rh.pitch_deg == 90 else (f"tilt {rh.pitch_deg:.0f} deg" if rh.pitch_deg else "free")
-                print(f"   {tag}: IK ok ({ori}, err {rh.pos_err_mm:.1f} mm)")
+                low = f", hover lowered to {s['hover_mm']:.0f} mm" if s["hover_mm"] < a.hover_mm else ""
+                print(f"   {tag}: IK ok ({ori}, err {rh.pos_err_mm:.1f} mm{low})")
                 try:
                     safety.extra_checks = [check]
                     fp = o["footprint_mm"]
@@ -346,7 +358,7 @@ def main(argv=None):
                         arm.move_to(rt.q, label=f"transit above {s['name']}")
                     arm.move_to(rh.q, label=f"hover {s['name']}")
                     if a.gripper_demo:
-                        say(f"over {s['name']}: jaws aligned with the part, {a.hover_mm:.0f} mm above it")
+                        say(f"over {s['name']}: jaws aligned with the part, {s['hover_mm']:.0f} mm above it")
                         arm.gripper(60)
                     if a.live:
                         time.sleep(a.dwell_s)
@@ -361,7 +373,7 @@ def main(argv=None):
                     if "declined" in str(e):
                         break
             if prev is not None:
-                lines = [f"{i}/{len(steps)} {s['name']}: hover {a.hover_mm:.0f} mm above part (h={o.get('height_mm') or 0:.0f} mm)",
+                lines = [f"{i}/{len(steps)} {s['name']}: hover {s['hover_mm']:.0f} mm above part (h={o.get('height_mm') or 0:.0f} mm)",
                          f"bed ({o['center_mm'][0]:.0f}, {o['center_mm'][1]:.0f}) mm  status: {row['status']}",
                          f"pitch {rh.pitch_deg}  err {rh.pos_err_mm:.1f} mm  calib: {calib.method}"]
                 f = runs / f"real_preview_{i:02d}_{s['name']}.png"

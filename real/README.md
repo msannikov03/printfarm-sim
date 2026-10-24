@@ -135,7 +135,7 @@ Expected: `[creality] printing  42.0%  bed 60.0/60C  nozzle 220.1/220C  left 12.
 - Leave about 20 mm between parts so the gripper fits. Keep parts in the front ~2/3 of the bed (see the reach map in step 8).
 - **Always also export the sliced file** (File → Export G-code / "Export plate sliced file") to the laptop. If the printer will not serve the file, run with `--gcode that_file.gcode`. `.gcode.3mf` also works.
 - Without labels it still works: extrusions of the first 3 layers are clustered into parts. Purge lines and skirts are dropped. Parts must not touch each other or share a brim.
-- Purge tab (optional, [docs/purge.md](../docs/purge.md)): add a 10 x 20 x 20 mm object named `purge_tab` at the front centre and end the start G-code's prime line inside it. The parser marks it `role: "purge"` and puts it first in the pick order. `py -m real.synth_gcode t.gcode --purge-tab` writes a test file with this layout.
+- Purge tab (optional, [docs/purge.md](../docs/purge.md)): add a 10 x 20 x 20 mm object named `purge_tab` at the front centre and end the start G-code's prime line inside it. The parser marks it `role: "purge"` and puts it first in the pick order. `py -m real.synth_gcode t.gcode --purge-tab` writes a test file with this layout. The tab stands at the front edge, close to the arm, so with the nominal placement it is just out of reach at the default 40 mm hover: `real.run_demo` then retries the hover lower, in 5 mm steps down to 20 mm, and prints "hover lowered to N mm" for that object.
 
 Check what the parser sees:
 ```bash
