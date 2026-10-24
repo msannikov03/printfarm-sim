@@ -16,9 +16,13 @@ python scripts/fill_results.py --lint                                    # nothi
 
 ## Unloading batches
 
+The one-row batches (`IDEAL_*`, `REAL_*`, `HARSH_*`, `FAULT_*`) were measured before the carriage moves changed to
+"fold only when needed" ([door.md](door.md)); that change affects only how the arm rides the rail between steps.
+The two-row batches and the farm run use the current code.
+
 | Placeholders | Command | Read from |
 |---|---|---|
-| `ROWA_*`, `ROWB_*` | `python scripts/eval_unload.py --n 20 --procs 5 --realism realistic --printer 4 --out runs/two_rows_v3/eval_p4` (row A) / `--printer 14 --out runs/two_rows_v3/eval_p14` (row B), default two-row cell | `runs/two_rows_v3/eval_p4/summary.json`, `runs/two_rows_v3/eval_p14/summary.json` |
+| `ROWA_*`, `ROWB_*` | `python scripts/eval_unload.py --n 20 --procs 5 --realism realistic --printer 4 --out runs/two_rows_v4/eval_p4` (row A) / `--printer 14 --out runs/two_rows_v4/eval_p14` (row B), default two-row cell | `runs/two_rows_v4/eval_p4/summary.json`, `runs/two_rows_v4/eval_p14/summary.json` |
 | `IDEAL_*` | `PRINTFARM_LAYOUT=one_row python scripts/eval_unload.py --n 40 --procs 8 --realism ideal --out runs/final_v3/ideal` | `runs/final_v3/ideal/summary.json` |
 | `REAL_*` | same with `--realism realistic --out runs/final_v3/realistic` | `runs/final_v3/realistic/summary.json` |
 | `HARSH_*` | same with `--realism harsh --out runs/final_v3/harsh` | `runs/final_v3/harsh/summary.json` |
@@ -81,19 +85,23 @@ Ground-truth poses are used only to compute these errors. The planners never see
 
 | Placeholders | Command | Read from |
 |---|---|---|
-| `FARM_*` | `python scripts/run_farm.py --hours 12 --plates 16 --realism realistic --video --out runs/farm_box` (default two-row cell; orders draw all SKUs, large parts included) | `runs/farm_box/summary_s0.json` |
+| `FARM_*` | `python scripts/run_farm.py --hours 16 --plates 30 --backlog 20 --realism realistic --video --out runs/farm_full20` (default two-row cell; orders draw all SKUs, large parts included; 20 orders queued at t=0 so that all 20 printers get plates) | `runs/farm_full20/summary_s0.json` |
 
 - Plates unloaded, `farm_hours`, `picks`, `stats.door_open_ok` / `door_close_ok`, `lead_h_p50` / `lead_h_p90`,
   `stats.interventions` (`FARM_INTERV`) and `station.stats.boxes_complete` / `boxes_sealed` (`FARM_BOXES`).
 - `summary_s0.json` does not record the realism preset, and `run_farm.py` defaults to `--realism ideal`: check the
   command when re-running.
-- The lead times are censored by the run length: a 3.5 h run ships 24 of its 42 orders, and only those count.
+- The lead times are censored by the run length: only orders shipped within the run count. The backlog orders count
+  from t=0, which lengthens the lead times.
+- `printers_unloaded` in the summary counts the distinct printers unloaded (20 of 20 in this run). Without
+  `--backlog`, a short run at the default order rate leaves the last printers idle: idle printers take plates in
+  index order.
 
 ## Bed to box
 
 | Placeholders | Command | Read from |
 |---|---|---|
-| `BOX_LARGE` | `python scripts/eval_unload.py --n 20 --realism realistic --skus mixed --printer 4 --out runs/verify_v3/mixed_p4` (row A) / `--printer 14 --out runs/verify_v3/mixed_p14` (row B); plates are packed with the farm's 3 h cap | `summary.json` `by_size.large`: `truly_placed / parts` |
+| `BOX_LARGE` | `python scripts/eval_unload.py --n 20 --realism realistic --skus mixed --printer 4 --out runs/verify_v4/mixed_p4` (row A) / `--printer 14 --out runs/verify_v4/mixed_p14` (row B); plates are packed with the farm's 3 h cap | `summary.json` `by_size.large`: `truly_placed / parts` |
 | `BOX_BENCH` | `python scripts/run_farm.py --station-bench 12 --realism realistic --out runs/station_bench` (station only: random orders, parts spawned into the totes and the tray) | `runs/station_bench/summary_s0.json` `station.stats`, set by hand |
 | `BOX_STATION_S` | the same bench with `--times runs/station_times.json` | `runs/station_times.json` `package`: robot-blocking time per package (box request, large-part places, tote dump and camera check; sealing runs in the background) |
 | `BOX_PARKS` | `python -m fleet.des --compare --days 7 --seeds 5 --skus small --queue-policy fifo` vs `--queue-policy package`; with large parts the `DES_ALL_*` runs | `partial_handoffs` per week (an incomplete package's tote or tray slot handed to the station's consolidation shelf, i.e. an operator task): `runs/des_box_pkg/queue_policy.json` (small mix) and `runs/des_final/all148/summary.txt`, set by hand |

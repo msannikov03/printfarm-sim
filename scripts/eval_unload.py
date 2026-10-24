@@ -170,6 +170,8 @@ def episode(args):
     if rec:
         rec.close()
     res["sim_s"] = float(w.d.time)
+    res["motion"] = D.motion_summary(getattr(w, "transfer_log", []))      # carriage moves (reporting)
+    res["moves"] = list(getattr(w, "transfer_log", []))
     res["blob_drops"] = dict(getattr(ex, "blob_drops", {}) or {})   # blob picks into the reject bin, robot's verdict
     res["parked_off"] = list(U.HOUSEKEEPING_LOG or [])              # truth: failed parts that lay off bed / bins
     res["wall_s"] = time.time() - t_wall
@@ -300,6 +302,14 @@ def summarize(results):
             out[f"blob_drop:{k}"] += v              # robot: blob picks confirmed in the reject bin / missed / stuck
         for e in r.get("parked_off") or []:
             out[f"parked_off:{e['where']}"] += 1    # truth: a failed part lay on the deck / floor / in the chamber
+    for r in results:                               # carriage moves: slide pose, times, contacts (reporting)
+        mo = r.get("motion") or {}
+        out["carriage_moves"] += mo.get("carriage_moves", 0)
+        out["folds_low_tuck"] += mo.get("folds_low_tuck", 0)
+        out["move_contact_ticks"] += mo.get("contact_ticks", 0)
+        for k, v in (mo.get("by_pose") or {}).items():
+            out[f"move_pose:{k}"] += v
+    out["transfer_s"] = round(sum((r.get("motion") or {}).get("transfer_s", 0.0) for r in results), 2)
     out["bed_not_empty"] = sum(not r.get("bed_empty_after", True) for r in results)
     out["beds_blocked"] = sum(any(p.get("blocking") for p in r["parts"]) for r in results)
     deb = [r["faults"]["debris"] for r in results if r.get("faults", {}).get("debris")]

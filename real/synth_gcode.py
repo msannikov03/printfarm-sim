@@ -9,6 +9,11 @@ Writes a plausible single-extruder file in one of four labelling styles:
   none     - no object labels at all (forces the clustering fallback)
 
 Every style can carry an Ender-style prime/purge line at the left bed edge, a skirt, and arcs.
+
+purge_tab=True (CLI --purge-tab) instead writes the robot-cell layout of docs/purge.md: the start G-code primes along
+the front strip (TAB_STRIP_MM deep) into the footprint of a small grab tab, and the tab (TAB_MM, at the front centre)
+is printed as an object named "purge_tab" (labelled like the parts in the labelled styles). The prime line fuses to
+the tab's first layer, so a robot that picks the tab first takes the line with it.
 """
 from __future__ import annotations
 
@@ -39,6 +44,17 @@ class Part:
         return loc @ np.array([[c, s], [-s, c]]) + np.asarray(self.center)
 
 
+TAB_MM = (10.0, 20.0, 20.0)          # purge tab: x, y, height (the sim's farm/catalog.py PURGE_TAB_MM)
+TAB_STRIP_MM = 26.0                  # front strip kept free of parts for the tab and its prime line (PURGE_STRIP_MM)
+TAB_LINE_MM = 55.0                   # prime line length (PURGE_LINE_MM[0]): along +x, ending under the tab
+TAB_NAME = "purge_tab"
+
+
+def purge_tab_part(bed=(220.0, 220.0)) -> Part:
+    """The grab tab at the front centre of the bed (its prime line runs to its right, along the front strip)."""
+    return Part(TAB_NAME, (bed[0] / 2, TAB_STRIP_MM / 2), (TAB_MM[0], TAB_MM[1]), TAB_MM[2])
+
+
 DEFAULT_PARTS = [
     Part("bracket", (70.0, 60.0), (40.0, 18.0), 12.0, yaw_deg=30.0),
     Part("knob", (140.0, 55.0), (24.0, 24.0), 18.0, shape="cyl"),
@@ -53,6 +69,7 @@ class SynthOpts:
     layer_h: float = 0.2
     purge: bool = True
     purge_comment: bool = True         # False: purge line has no comment (geometry heuristic must catch it)
+    purge_tab: bool = False            # True: front-strip prime line ending in a "purge_tab" object (docs/purge.md)
     layer_markers: bool = True         # False: no ;LAYER markers (start-gcode region cannot be detected)
     skirt: bool = False
     relative_e: bool = False
@@ -118,6 +135,9 @@ class _Writer:
 def make_gcode(parts: list[Part] | None = None, opts: SynthOpts | None = None) -> str:
     parts = DEFAULT_PARTS if parts is None else parts
     o = opts or SynthOpts()
+    tab = purge_tab_part(o.bed) if o.purge_tab else None
+    if tab is not None:
+        parts = [tab] + [p for p in parts if p.name != TAB_NAME]
     w = _Writer(o.relative_e)
     bx, by = o.bed
     st = o.style
@@ -146,7 +166,15 @@ def make_gcode(parts: list[Part] | None = None, opts: SynthOpts | None = None) -
     w.line("M104 S220")
     w.line("G28")
     w.line("G92 E0")
-    if o.purge:
+    if tab is not None:                # start G-code (Klipper PRINT_START / Marlin start code): prime along the front
+        cm = "prime line" if o.purge_comment else ""        # strip and end inside the tab's footprint
+        (cx, cy), x_end = tab.center, tab.center[0] + TAB_MM[0] / 2 + TAB_LINE_MM
+        w.line("; PURGE_TAB_PRIME: prime line along the front strip into the purge tab (docs/purge.md)")
+        w.travel(x_end, cy, 0.3)
+        w.extrude(cx, cy, cm, w=0.8, h=0.3)
+        w.line("G92 E0")
+        w.e = 0.0
+    elif o.purge:
         cm = "prime line" if o.purge_comment else ""
         w.travel(3.0, 20.0, 0.28)
         w.extrude(3.0, 160.0, cm)
@@ -237,7 +265,9 @@ if __name__ == "__main__":
     ap.add_argument("out")
     ap.add_argument("--style", default="orca", choices=["orca", "orca_comments", "m486", "cura", "none"])
     ap.add_argument("--no-purge", action="store_true")
+    ap.add_argument("--purge-tab", action="store_true", help="front-strip prime line into a purge_tab object")
     ap.add_argument("--skirt", action="store_true")
     a = ap.parse_args()
-    open(a.out, "w").write(make_gcode(opts=SynthOpts(style=a.style, purge=not a.no_purge, skirt=a.skirt)))
+    open(a.out, "w").write(make_gcode(opts=SynthOpts(style=a.style, purge=not a.no_purge, skirt=a.skirt,
+                                                     purge_tab=a.purge_tab)))
     print("wrote", a.out)

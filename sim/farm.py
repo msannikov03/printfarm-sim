@@ -26,7 +26,7 @@ from fleet.scheduler import TRAY_HOLD_S, Candidate, Snapshot, choose
 from jobs.orders import Order, OrderStream, sample_lines
 from jobs.packaging import package_fit, part_sku
 from jobs.plates import make_plate
-from plan.door import TUCK, operate_door, transfer
+from plan.door import TUCK, motion_summary, operate_door, transfer
 from farm.lab import set_status
 from plan.sweep import in_tray
 from plan.unload import mirror_plate, on_bed, spawn_plate, unload_parts
@@ -65,6 +65,7 @@ class Farm:
         self.mask, self.policy, self.log = mask, policy, log
         self.plate_n = 0
         self.stats = collections.Counter()
+        self.drive_s = 0.0          # robot time in the farm's drives to a printer (reporting)
         self.events = []
         self.part_log = []
         self.lead = []
@@ -181,7 +182,9 @@ class Farm:
 
     # ------------------------------------------------------------------ robot actions (physics)
     def drive(self, x):
+        t0 = self.w.d.time
         transfer(self.ex, self.ik, TUCK, x)
+        self.drive_s += self.w.d.time - t0
         self.sync_clock()
 
     def unload(self, p):
@@ -542,7 +545,8 @@ class Farm:
                "interventions_per_part": self.stats["interventions"] / max(n_picks, 1),
                "reprints_per_part": self.stats["reprints"] / max(n_picks, 1),
                "lead_h_p50": float(np.nanpercentile(lead, 50)), "lead_h_p90": float(np.nanpercentile(lead, 90)),
-               "caddy": self.alloc.metrics}
+               "caddy": self.alloc.metrics,
+               "motion": dict(motion_summary(getattr(self.w, "transfer_log", [])), drive_s=round(self.drive_s, 2))}
         if self.station is not None:
             out["station"] = self.station.summary()
             out["station"]["robot_contacts"] = dict(self.contact_pairs)

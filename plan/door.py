@@ -17,6 +17,7 @@ World.door_angle(i) (truth) is used only for printing and reporting.
 The carriage position for an arc is chosen by search: every arc sample must have a collision-free IK solution; the
 score is the worst-case manipulability x joint-limit margin along the arc.
 """
+import collections
 import math
 
 import mujoco
@@ -30,6 +31,20 @@ from plan.motion import cartesian_line
 TUCK = np.array([0.0, 1.4, 2.6, 0.5, 0.0, 0.0])     # compact upright 'candle' (neutral via-pose for planning)
 LOW_TUCK = np.array([0.0, 0.0, 3.3, 0.75, 0.0, 0.0])  # folded below the door line: the carriage slides under open doors
 SLIDE_CLEAR = 0.004     # in a slide the arm moves rigidly with its deck, so arm-deck gaps don't change: fine clearance
+SLIDE_CLEAR_TALL = 0.012    # upright / held-pose slides: the taller arm sways under the carriage's acceleration (servo
+                            # compliance; measured in physics by SlideProbe), so these keep a wider gap to the scene
+SLIDE_STEP = 0.02       # slide check: one sample per 2 cm of rail (and both ends); with the clearance this leaves no gap
+                        # through which a thin obstacle (an open leaf's edge, a 15 mm handle bar) could slip unchecked
+COMPACT_R = 0.30        # the current pose slides as it is when the fingertips (and a held part) are within this of the
+                        # arm's base axis: over the deck (|y| < 0.31 m), clear of the aisle in front of the doors
+COMPACT_DZ = 0.90       # ... and at most this above the base: no taller than the candle (TUCK's pinch is 0.86 m up),
+                        # the tallest slide pose (its slide over the whole rail: tests/test_station.py)
+SLIDE_ACC_TALL = 0.7    # peak carriage acceleration in an upright / held-pose slide (m/s^2). Measured (SlideProbe, the
+                        # pinch vs a rigid arm): on its position servos the candle swayed 16 mm in a 10 cm hop at the
+                        # rail's default timing (peak 3.8 m/s^2), more than SLIDE_CLEAR_TALL; 6-9 mm capped at 1 m/s^2
+SLIDE_SETTLE = (0.004, 0.6)     # before a slide: wait until the joints track within this (rad, encoders), at most this
+                                # long (s): the residual swing of the move into the slide pose adds to the sway
+
 
 ARC_N = 14
 PRE_UP = 0.05
@@ -285,11 +300,102 @@ def _plan_q(ik, q0, q1, ctx, iters=3000):
     return path
 
 
+class SlideProbe:
+    """Executor hook for one phase of a carriage move (reporting only, SIM truth): ticks with a contact between the
+    arm (or a held part) and anything not on the carriage, the deepest such contact, the pairs, and in a slide the
+    sway: how far the pinch strays from where a rigid arm on the moving carriage would put it."""
+
+    def __init__(self, w, held=(), slide=False):
+        m = w.m
+        self.w, self.slide = w, slide
+        self.arm = np.zeros(m.ngeom, bool)
+        self.arm[list(w.arm_geoms | set(held))] = True
+        self.rig = np.zeros(m.ngeom, bool)
+        self.rig[list(w.robot_geoms | set(held))] = True
+        self.p0 = w.d.site_xpos[w.grasp_site].copy()
+        self.x0 = float(w.d.qpos[w.rail_q])
+        self.ticks, self.pen, self.sway, self.pairs = 0, 0.0, 0.0, collections.Counter()
+
+    def __call__(self, w):
+        m, d = w.m, w.d
+        if self.slide:
+            rigid = self.p0 + np.array([float(d.qpos[w.rail_q]) - self.x0, 0.0, 0.0])
+            self.sway = max(self.sway, float(np.linalg.norm(d.site_xpos[w.grasp_site] - rigid)))
+        hit = False
+        for c in d.contact[:d.ncon]:
+            if c.dist >= 0.0 or self.arm[c.geom1] == self.arm[c.geom2]:
+                continue
+            if self.rig[c.geom2 if self.arm[c.geom1] else c.geom1]:
+                continue
+            hit = True
+            self.pen = max(self.pen, -float(c.dist))
+            self.pairs[f"{m.body(m.geom_bodyid[c.geom1]).name}-{m.body(m.geom_bodyid[c.geom2]).name}"] += 1
+        self.ticks += hit
+
+
+def _run_phase(ex, rec, phase, fn, slide=False):
+    """Run fn() with a SlideProbe hooked in; add its time and contacts to the move record (reporting only)."""
+    w = ex.w
+    ik_held = getattr(ex, "_ik_held", ())
+    probe = SlideProbe(w, ik_held, slide)
+    hooks = list(getattr(w, "hooks", []))
+    w.hooks = hooks + [probe]
+    t0 = w.d.time
+    try:
+        fn()
+    finally:
+        w.hooks = hooks
+    rec[f"{phase}_s"] = rec.get(f"{phase}_s", 0.0) + w.d.time - t0
+    rec["contact_ticks"] = rec.get("contact_ticks", 0) + probe.ticks
+    if probe.ticks:
+        rec[f"{phase}_contacts"] = rec.get(f"{phase}_contacts", 0) + probe.ticks
+    rec["max_pen_mm"] = max(rec.get("max_pen_mm", 0.0), 1000 * probe.pen)
+    pairs = rec.setdefault("pairs", {})
+    for k, v in probe.pairs.items():
+        pairs[k] = pairs.get(k, 0) + v
+    if slide:
+        rec["sway_mm"] = round(1000 * probe.sway, 2)
+
+
+def _log_move(w, rec):
+    if not hasattr(w, "transfer_log"):
+        w.transfer_log = []
+    rec["total_s"] = sum(rec.get(f"{k}_s", 0.0) for k in ("tuck", "slide", "unfold", "path"))
+    w.transfer_log.append(rec)
+
+
+def motion_summary(log):
+    """Carriage moves made by transfer(): slide pose used, times, contacts, sway (SIM truth, reporting only)."""
+    log = list(log or [])
+    by = collections.Counter(r["pose"] for r in log)
+    tot = lambda k: round(float(sum(r.get(k, 0.0) for r in log)), 2)
+    sway = collections.defaultdict(float)
+    pairs = collections.Counter()
+    for r in log:
+        sway[r["pose"]] = max(sway[r["pose"]], r.get("sway_mm", 0.0))
+        pairs.update(r.get("pairs", {}))
+    n = len(log)
+    return {"carriage_moves": n, "by_pose": dict(by), "folds_low_tuck": by["low"],
+            "folds_per_move": round(by["low"] / max(n, 1), 3),
+            "transfer_s": tot("total_s"), "slide_s": tot("slide_s"), "tuck_s": tot("tuck_s"),
+            "unfold_s": tot("unfold_s"), "path7d_s": tot("path_s"),
+            "mean_move_s": round(tot("total_s") / max(n, 1), 2),
+            "contact_ticks": int(sum(r.get("contact_ticks", 0) for r in log)),
+            "moves_with_contact": int(sum(r.get("contact_ticks", 0) > 0 for r in log)),
+            "max_pen_mm": round(max([r.get("max_pen_mm", 0.0) for r in log] or [0.0]), 2),
+            "max_sway_mm": {k: round(v, 2) for k, v in sway.items()}, "contact_pairs": dict(pairs.most_common(10))}
+
+
 def transfer(ex, ik, q_goal, x, ctx_extra=None):
     """Collision-free move of arm (and carriage) to (q_goal, x): joint-space planning at a fixed carriage position,
-    or tuck -> checked slide -> unfold when the carriage moves, falling back to planning in joint+rail space."""
+    or, when the carriage moves, into a slide pose -> checked slide -> out to the goal, falling back to planning in
+    joint+rail space. Slide poses, cheapest first: the current pose if compact(), the upright candle TUCK, the folded
+    LOW_TUCK (under open doors); the first with a free slide over the whole rail interval (believed doors, own rig
+    ignored, SLIDE_CLEAR_TALL / SLIDE_CLEAR), a free path into it and a free path out of it is used.
+    A held part is planned as part of the arm throughout (IK.attach), parts lying on the carriage ride along."""
     from plan.rrt import JointPlanner, RAIL_W
     w = ex.w
+    ex._ik_held = tuple(ik.held[0]) if ik.held is not None else ()
     sync_beliefs(ik, w)          # doors as the robot believes them (reed switch + FK estimates), not truth
     ctx = {"x": x, "grip": max(ex.finger_gap_mm(), 0.0) / 2000.0}    # jaw opening from the gripper encoder
     ctx.update(ctx_extra or {})
@@ -303,37 +409,60 @@ def transfer(ex, ik, q_goal, x, ctx_extra=None):
         ex.move_path(path, label="transfer")
         return True
     here = dict(ctx, x=ex.x)
-    p_tuck = [ex.q, LOW_TUCK] if np.allclose(ex.q, LOW_TUCK, atol=1e-3) else _plan_q(ik, ex.q, LOW_TUCK, here)
     rig = set(ctx.get("ignore", ())) | own_rig(w)     # the arm slides rigidly with its own deck and caddy
-    slide_ok = p_tuck is not None and all(not ik.collides(LOW_TUCK, ex.x + (x - ex.x) * k / 24, None,
-                                                          grip=ctx["grip"], ignore_bodies=rig,
-                                                          clearance=SLIDE_CLEAR)
-                                          for k in range(25))
-    if p_tuck is not None and not slide_ok and VERBOSE:
-        for k in range(25):
-            xk = ex.x + (x - ex.x) * k / 24
-            if ik.collides(LOW_TUCK, xk, None, grip=ctx["grip"], ignore_bodies=rig, clearance=SLIDE_CLEAR):
+    rec = {"t": round(float(w.d.time), 2), "dx": round(float(x - ex.x), 4), "held": ik.held is not None}
+    # slide poses, cheapest first: the current pose if compact, the upright candle, folded low (passes under open
+    # doors). The first whose slide (whole rail interval, believed doors), path in and path out are free wins.
+    cands = [("hold", ex.q.copy(), SLIDE_CLEAR_TALL)] if compact(ik, ex.q, ex.x) else []
+    cands += [("upright", TUCK, SLIDE_CLEAR_TALL), ("low", LOW_TUCK, SLIDE_CLEAR)]
+    why = []
+    for k, (name, q_s, clr) in enumerate(cands):
+        if any(np.allclose(q_s, c[1], atol=1e-3) for c in cands[:k]):
+            continue                                       # e.g. the current pose IS the candle
+        at = slide_blocked(ik, q_s, ex.x, x, ctx["grip"], rig, clr)
+        if at is not None:
+            why.append(f"{name} slide blocked at x={at:.3f}")
+            if VERBOSE and name == "low":
                 hits = sorted({(ik.m.body(ik.m.geom_bodyid[c.geom1]).name, ik.m.body(ik.m.geom_bodyid[c.geom2]).name,
                                 round(1000 * c.dist, 1)) for c in ik.d.contact[:ik.d.ncon]
                                if (c.geom1 in w.arm_geoms) != (c.geom2 in w.arm_geoms) and c.dist < ik.MARGIN})
-                print(f"    slide blocked at x={xk:.3f} (from {ex.x:.3f} to {x:.3f}): {hits[:4]}")
-                break
-    p_unfold = _plan_q(ik, LOW_TUCK, q_goal, ctx) if slide_ok else None
-    if p_unfold is not None:
-        ex.move_path(p_tuck, label="tuck")
-        ex.move(None, x, label="slide")
-        ex.move_path(p_unfold, label="unfold")
+                print(f"    slide blocked at x={at:.3f} (from {ex.x:.3f} to {x:.3f}): {hits[:4]}")
+            continue
+        same_in = np.allclose(ex.q, q_s, atol=1e-3)
+        p_in = None if same_in else _plan_q(ik, ex.q, q_s, here)
+        if not same_in and p_in is None:
+            why.append(f"{name}: no path into it")
+            continue
+        same_out = np.allclose(q_s, q_goal, atol=1e-3)
+        p_out = None if same_out else _plan_q(ik, q_s, q_goal, ctx)
+        if not same_out and p_out is None:
+            why.append(f"{name}: no path out of it")
+            continue
+        rec["pose"] = name
+        if p_in is not None:
+            _run_phase(ex, rec, "tuck", lambda: ex.move_path(p_in, label="tuck"))
+        _run_phase(ex, rec, "tuck", lambda: ex.settle(*SLIDE_SETTLE))   # the slide starts with the arm at rest
+
+        _run_phase(ex, rec, "slide", lambda: slide(ex, x, name), slide=True)
+        if p_out is not None:
+            _run_phase(ex, rec, "unfold", lambda: ex.move_path(p_out, label="unfold"))
+        _log_move(w, rec)
         return True
     lo, hi = min(ex.x, x) - 0.3, max(ex.x, x) + 0.3
     path = JointPlanner(ik, rail_bounds=(lo, hi)).plan(np.r_[ex.q, ex.x * RAIL_W], np.r_[q_goal, x * RAIL_W], ctx,
                                                        max_iters=4000)
     if path is None:
         if VERBOSE:
-            print(f"    transfer: no path (tuck {'ok' if p_tuck is not None else 'FAIL'}, slide "
-                  f"{'ok' if slide_ok else 'BLOCKED'}, unfold FAIL, 7-D FAIL)")
+            print(f"    transfer: no path ({'; '.join(why)}; 7-D FAIL)")
+        _log_move(w, dict(rec, pose="fail"))
         return False
-    for v in path[1:]:
-        ex.move(v[:6], v[6] / RAIL_W, label="transfer")
+    rec["pose"] = "7d"
+
+    def run_path():
+        for v in path[1:]:
+            ex.move(v[:6], v[6] / RAIL_W, label="transfer")
+    _run_phase(ex, rec, "path", run_path)
+    _log_move(w, rec)
     return True
 
 
@@ -414,6 +543,43 @@ def execute_arc(ex, ik, i, plan, label, from_tuck=True):
     return w.d.time - t0
 
 
+def compact(ik, q, x):
+    """Can the arm slide in pose q as it is? Fingertips and a held part (planning model: as the robot believes it is
+    held) within COMPACT_R of the base axis and at most COMPACT_DZ above the base."""
+    m, d = ik.m, ik.d
+    ik.fk(q, x)
+    base = d.xpos[m.body("arm").id]
+    pts = [d.site_xpos[ik.site]] + [d.xpos[b] for b in ik.w.finger_bodies]
+    if ik.held is not None:
+        pts.append(d.site_xpos[ik.site] + d.site_xmat[ik.site].reshape(3, 3) @ ik.held[2])
+    pts = np.array(pts) - base
+    return bool(np.max(np.hypot(pts[:, 0], pts[:, 1])) <= COMPACT_R and np.max(pts[:, 2]) <= COMPACT_DZ)
+
+
+def slide_blocked(ik, q, x0, x1, grip, ignore, clearance, doors=None):
+    """First rail position on x0 -> x1 at which the arm in pose q (with a held part) comes within `clearance` of the
+    robot's believed scene (doors from sync_beliefs, `ignore` = the carriage's own rig), or None if the whole slide is
+    free. Sampled every SLIDE_STEP and at both ends."""
+    n = max(24, int(math.ceil(abs(x1 - x0) / SLIDE_STEP)))
+    for k in range(n + 1):
+        xk = x0 + (x1 - x0) * k / n
+        if ik.collides(q, xk, doors, grip=grip, ignore_bodies=ignore, clearance=clearance):
+            return xk
+    return None
+
+
+def slide(ex, x, pose):
+    """The carriage move itself (arm joints held). Tall poses may be limited to SLIDE_ACC_TALL: a quintic move over
+    distance L in T seconds peaks at 5.77 L / T^2."""
+    from plan.motion import PAYLOAD_SCALE, RAIL_VMAX
+    dur = None
+    if pose != "low" and SLIDE_ACC_TALL:
+        L = abs(x - ex.x)
+        k = PAYLOAD_SCALE if ex.payload else 1.0
+        dur = max(L / (RAIL_VMAX * k) * 1.6, 0.3, math.sqrt(5.7735 * L / SLIDE_ACC_TALL))
+    ex.move(None, x, duration=dur, label="slide")
+
+
 def own_rig(w):
     """Carriage bodies other than the arm (deck, caddy, bins): they move rigidly with the arm in a slide, so
     arm-vs-rig gaps cannot change there (model error must not make a slide look blocked)."""
@@ -492,7 +658,7 @@ def operate_door(ex, ik, i, opening):
             print(f"    reed switch still open after close attempt {attempt + 1} "
                   f"(true {np.degrees(w.door_angle(i)):.2f} deg)")
     xc, s = C.printer_frame(i)
-    if not transfer(ex, ik, LOW_TUCK, xc + s * 0.35):  # park folded, ready for the next step
+    if not transfer(ex, ik, TUCK, xc + s * 0.35):     # park upright (transfer folds low only if a slide needs it)
         return True, w.d.time - t0, "door done; could not park"
     if opening and w.door_belief(i) < OPEN_OK_RAD:
         return False, w.d.time - t0, f"door estimate {np.degrees(w.door_belief(i)):.0f} deg after opening"

@@ -29,7 +29,7 @@ def run(P, video=False, verbose=True, arc_seg_s=None, squeeze=None):
     w = World()
     ik = IK(w)
     xc, s = C.printer_frame(P)
-    w.reset(rail_x=xc + 0.5 * s)
+    w.reset(rail_x=float(np.clip(xc + 0.5 * s, C.RAIL_X_MIN, C.RAIL_X_MAX)))   # (row B end printer: in range)
     w.d.qpos[w.arm_q] = D.TUCK
     w.d.ctrl[w.act_arm] = D.TUCK
     mujoco.mj_forward(w.m, w.d)
@@ -55,6 +55,10 @@ def run(P, video=False, verbose=True, arc_seg_s=None, squeeze=None):
               f"{out[key]['belief_deg']:6.2f}, reed {'closed' if w.reed_closed(P) else 'open'}, sim {dt:.1f}s, "
               f"wall {time.time() - t:.0f}s", flush=True)
     out["robot_env_contacts_end"] = len(w.contacts_robot_env())
+    out["motion"] = D.motion_summary(getattr(w, "transfer_log", []))      # carriage moves (reporting)
+    out["moves"] = list(getattr(w, "transfer_log", []))
+    print(f"P{P} carriage moves {out['motion']['carriage_moves']} {out['motion']['by_pose']}, transfer "
+          f"{out['motion']['transfer_s']} s, contact ticks {out['motion']['contact_ticks']}", flush=True)
     if rec:
         rec.close()
     return out

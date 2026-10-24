@@ -17,7 +17,7 @@ from farm.catalog import BED_MM, CATALOG, LARGE_SKUS, PART_SPACING_MM, PURGE_STR
 
 MAX_PLATE_S = 3 * 3600.0            # cap on one plate's print time (ASSUMPTION)
 BED_MARGIN_MM = 5.0                 # keep-out along the bed edges (ASSUMPTION)
-from farm.catalog import PURGE_TAB_CLEAR_MM, PURGE_TAB_MM   # tab x, y, z (mm)
+from farm.catalog import PURGE_LINE_MM, PURGE_TAB_CLEAR_MM, PURGE_TAB_MM   # tab x, y, z; prime line (mm)
 PURGE_TAB_CM3 = PURGE_TAB_MM[0] * PURGE_TAB_MM[1] * PURGE_TAB_MM[2] / 1000.0
 LOOKAHEAD_ORDERS = 30               # orders scanned past the first one that was held back
 JAW_KEEPOUT_MM = 10.0               # large parts: extra room on both long sides (jaws open near their full stroke)
@@ -174,10 +174,15 @@ def pack(parts, reach_mask=None, max_print_s=MAX_PLATE_S, purge=None):
 
 
 def _purge_tab(reach_mask):
-    """Front-centre of the strip (nearest the robot, fixed by the start G-code); off-centre only if unreachable."""
+    """Front-centre of the strip (nearest the robot, fixed by the start G-code); off-centre only if unreachable.
+    The prime line runs PURGE_LINE_MM[0] along +x from the tab's right face: it must stay on the bed, also on the
+    mirrored layout (plan/unload.py mirror_plate)."""
     w, d, _ = PURGE_TAB_MM
     cy = PURGE_STRIP_MM / 2
+    reach = w / 2 + PURGE_LINE_MM[0] + BED_MARGIN_MM
     for cx in [BED_MM[0] / 2, *sorted(np.arange(10.0, BED_MM[0] - 10.0 + 1e-9, 5.0), key=lambda x: abs(x - BED_MM[0] / 2))]:
+        if max(cx, BED_MM[0] - cx) + reach > BED_MM[0]:
+            continue
         if reach_mask is None or _rect_ok(reach_mask, cx - w / 2, cy - d / 2, w, d):
             return {"center_mm": [float(cx), cy], "dims_mm": list(PURGE_TAB_MM)}
     raise ValueError("no reachable purge-tab position in the purge strip")
@@ -231,6 +236,10 @@ def to_gcode(plate):
     g += ["M140 S60", "M104 S220", "G28", "M190 S60", "M109 S220", "G90", "M83", ""]
     (cx, cy), (w, d, h) = plate["purge_tab"]["center_mm"], plate["purge_tab"]["dims_mm"]
     x0, y0, x1, y1 = cx - w / 2, cy - d / 2, cx + w / 2, cy + d / 2
+    ln = PURGE_LINE_MM[0]
+    g += ["; prime line along the front strip, ending under the purge tab (fused to its first layer; docs/purge.md)",
+          "G1 Z2.000 F1200", f"G1 X{x1 + ln:.3f} Y{cy:.3f} F12000", "G1 Z0.300 F600",
+          f"G1 X{cx:.3f} Y{cy:.3f} E{(x1 + ln - cx) * E_PER_MM * 3:.4f} F900 ; prime line", ""]
     g += ["; purge tab (front strip), picked first into the waste bin", "G1 Z2.000 F1200",
           f"G1 X{x0:.3f} Y{y0:.3f} F12000", "G1 Z0.200 F600 ; purge", *_loop(x0, y0, x1, y1, " ; purge"),
           f"G1 Z{h:.3f} F600 ; purge", *_loop(x0, y0, x1, y1, " ; purge"), ""]

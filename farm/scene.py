@@ -420,10 +420,12 @@ def _part_body(name, sku, park_xyz):
     geoms = []
     cls = 'class="part"'
     if sku == "purge_tab":
-        # body origin = the grab tab (C.PURGE_TAB_MM); a short 25 mm prime line runs to its right
+        # body origin = the grab tab (C.PURGE_TAB_MM); the prime line (C.PURGE_LINE_MM) runs off its +x face along
+        # the front strip. One rigid body: lifting the tab takes the line with it
         tx, ty, tz = (v / 2000 for v in C.PURGE_TAB_MM)
+        lx, ly, lz = (v / 2000 for v in C.PURGE_LINE_MM)
         geoms.append(_box(None, (0.0, 0.0, tz), (tx, ty, tz), mat="purge", extra=cls))
-        geoms.append(_box(None, (tx + 0.0125, 0.0, 0.0006), (0.0125, 0.0018, 0.0006), mat="purge", extra=cls))
+        geoms.append(_box(None, (tx + lx, 0.0, lz), (lx, ly, lz), mat="purge", extra=cls))
     elif s.kind == "box":
         x, y, z = (d / 1000 for d in s.dims)
         geoms.append(_box(None, (0, 0, z / 2), (x / 2, y / 2, z / 2), mat="pla", extra=cls))
@@ -513,7 +515,7 @@ def build_xml(rail_x0=1.2):
     <material name="roofglass" rgba="0.7 0.8 0.9 0.15"/>
     <material name="pei" rgba="0.55 0.45 0.25 1" specular="0.3"/>
     <material name="pla" rgba="0.95 0.55 0.15 1"/>
-    <material name="purge" rgba="0.85 0.2 0.35 1"/>
+    <material name="purge" rgba="0.0 0.82 0.95 1" emission="0.25" specular="0.4" shininess="0.5"/>
     <material name="robotorange" rgba="0.95 0.45 0.1 1"/>
     <material name="carriage" rgba="0.2 0.42 0.72 1"/>
     <material name="rail" rgba="0.62 0.64 0.67 1" specular="0.5"/>

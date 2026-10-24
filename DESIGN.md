@@ -15,6 +15,15 @@ the numbers below are copied from it. Module structure and data contracts are in
   keeps the whole arm under 0.70 m, so the carriage can drive under doors that are open. Without this, an open door
   blocks the rail, and the door can only be swung from one side of the hinge. A layout sweep found no workable
   geometry at the old base height.
+- **Fold only when needed.** For every carriage move, `plan.door.transfer` takes the first slide pose whose path in,
+  slide and path out are all collision-free in the robot's believed scene, checked every 2 cm of rail. It tries, in
+  order:
+  1. the current pose, if it is compact;
+  2. the upright candle (`TUCK`), with 12 mm clearance and the carriage's acceleration capped at 0.7 m/s², because
+     the tall arm sways about 6 mm on its servos;
+  3. `LOW_TUCK`.
+  The arm therefore folds flat only to pass under an open door: 0.22 folds per carriage move in a farm run, against
+  1.0 before.
 - **Caddy beside the arm** (two rows; behind it in the one-row cell): eight bins on the deck on the +x side,
   where the base joint (-150 to +175 deg) reaches them from both rows. Six are package totes with a trap-door bottom
   (one package each, at most six small parts); the other two are `reject` and `waste` (purge tabs). Every drop pose
@@ -63,11 +72,20 @@ the numbers below are copied from it. Module structure and data contracts are in
 ## Slicer stand-in: design for automation
 
 - `PART_SPACING_MM = 25` between parts, so a jaw pad fits.
-- A 26 mm purge strip at the front holds a short prime line ending in a 10 x 20 x 20 mm grab tab. The tab sits at the
-  front centre, and parts keep 20 mm away from it.
+- A 26 mm purge strip at the front holds a 55 mm prime line ending in a 10 x 20 x 20 mm grab tab. The tab sits at the
+  front centre, and parts keep 20 mm away from it. See "Calibration line and purge tab" below.
 - `plan/bedmap.py` computes where on the bed every probe part can be grasped: 88 % of the bed in the current
   `runs/bedmap.json` (16 mm grid). The packer only places parts inside that area (`reach_mask`).
 - `mirror_plate()` packs parts toward the robot's side.
+
+## Calibration line and purge tab
+
+Every plate carries a purge tab, a 10 x 20 mm tower 20 mm tall, at the front centre. The slicer adds it as an
+object labelled in the G-code (`EXCLUDE_OBJECT_DEFINE NAME=purge_tab`). The printer's start G-code (Klipper macro or
+Marlin start code) primes along the front strip and ends inside the tab's footprint, so the line fuses to the tab's
+first layer. The robot picks the tab first, and the line comes with it into the waste tote. Bambu-class printers
+purge into a chute instead, so no line is left on the bed. The full spec, with the start G-code, how the robot
+handles the tab and the simulation details, is in [docs/purge.md](docs/purge.md).
 
 ## Timings contract (`runs/timings.json`)
 

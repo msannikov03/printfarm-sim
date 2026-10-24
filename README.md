@@ -13,7 +13,7 @@ a linear rail tends two facing rows of ten enclosed printers (Bambu P1S-class, 2
 middle of the aisle, and the arm turns between the rows. For each finished printer it:
 
 - **opens the glass door** by a plain D-handle with one whole-body swing of the arm and the rail. The arm then
-  folds low enough to drive under the open doors;
+  folds low enough to drive under the open doors (only when one is in the way: it drives upright otherwise);
 - **looks at the bed** with the printer's chamber camera and corrects the slicer's part poses with depth;
 - **plans a grasp for every part from the slicer's own geometry**: no learned policy, no training data;
 - **sorts parts by package**: small parts into the package's tote on its carriage, large ones into a tray slot, and
@@ -32,7 +32,7 @@ and order lead time p90 drops from **99.9 h** to **10.2 h**.
 **Watch / explore.** The whole 20-printer cell at 8x, filmed by an automatic camera director (`farm/director.py`
 picks a ray-cast, unoccluded angle for each unload, door, drive and station hand-off):
 
-![The 20-printer cell at work: unload close-up, a drive down the aisle, the station](docs/media/farm.gif)
+![The 20-printer cell at work: the purge tab into the waste tote, an unload, a drive down the aisle, the station](docs/media/farm.gif)
 
 To orbit, zoom and pause the running farm yourself: `PYTHONPATH=. .venv/bin/mjpython scripts/view_farm.py`
 (`--unload 5` for one printer; `mjpython` ships with MuJoCo and is needed on macOS, plain `python` elsewhere).
@@ -47,7 +47,7 @@ travel. 20 random plates per row, realistic sensors and actuation:
 
 | Printer | Parts placed | Doors open / closed | Printers blocked | Sim time per pick |
 |---|---|---|---|---|
-| Row A (printer 5) | 100/100 (100.0 %) | 20/20 / 20/20 | 0 | 17.2 s |
+| Row A (printer 5) | 100/100 (100.0 %) | 20/20 / 20/20 | 0 | 17.5 s |
 | Row B (printer 15, facing) | 99/100 (99.0 %) | 20/20 / 20/20 | 0 | 21.9 s |
 
 The [layout study](docs/layout.md) puts the knee at about 50 printers per arm: with 20 the arm is busy only
@@ -97,10 +97,11 @@ rake, every failed pick blocks its printer until the next shift, and the robot c
 baseline at about **7 %** failures per part. With the rake (failed parts are cleared and reprinted) it
 still out-produces the human at 20 % failures per part (23.3 vs 16.1 parts per printer per day). Layout options (rows, printers per arm) are compared in [docs/layout.md](docs/layout.md).
 
-**Whole cell, physics end to end** (`scripts/run_farm.py`, 20 printers, realistic sensors, large parts in the
-order mix): 16 plates in 7.0 farm-hours, 51/51 picks placed, doors 16/16 opened and 16/16 closed,
-11/11 boxes sealed complete, order lead time p50 / p90 2.3 h / 3.2 h (orders shipped within the run);
-operator interventions: 0.
+**Whole cell, physics end to end** (`scripts/run_farm.py --backlog 20`, 20 printers, realistic sensors, large parts
+in the order mix, a morning backlog of 20 orders so that every printer runs): 30 plates on all 20
+printers in 5.7 farm-hours, 117/120 picks placed (missed parts are reprinted automatically), doors
+30/30 opened and 30/30 closed, 29/29 boxes sealed complete, order lead time p50 / p90 3.3 h / 5.5 h (orders shipped within
+the run, backlog orders counted from the start); operator interventions: 0.
 
 **From bed to box** ([docs/station.md](docs/station.md)). An order ships as one or more packages: at most
 6 small parts, which ride in one tote on the carriage, plus at most two large parts (housing, plate,
@@ -214,6 +215,7 @@ export PYTHONPATH=.
 .venv/bin/python scripts/make_timings.py runs/eval && .venv/bin/python -m fleet.des --compare --days 7
 .venv/bin/python -m report.plots                              # Gantt / KPI / economics plots -> runs/plots/
 .venv/bin/python scripts/run_farm.py --hours 8 --plates 12 --video --speed 8   # whole cell -> runs/farm/
+.venv/bin/python scripts/run_farm.py --hours 16 --plates 30 --backlog 20 --video # + a morning order backlog: all 20 printers busy
 ```
 
 Add `--video` to the `test_*` scripts to write an mp4 to `runs/`. On a headless Linux box, set `MUJOCO_GL=egl`

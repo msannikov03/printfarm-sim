@@ -549,6 +549,10 @@ def bin_look(ex, ik, slot, held=None, ref=None):
     robot = (np.abs(pts[:, 0]) < 0.035) & (np.abs(pts[:, 1]) < max(gap, 0.015) + 0.025) & (pts[:, 2] < 0.015)
     if held is not None:
         robot |= np.linalg.norm(pts - held[0], axis=1) < held[1]
+        for a, b, r in held[2:]:                         # thin attachments (a purge tab's prime line): capsules
+            ab = np.asarray(b) - a
+            t = np.clip((pts - a) @ ab / max(ab @ ab, 1e-12), 0.0, 1.0)
+            robot |= np.linalg.norm(pts - (a + t[:, None] * ab), axis=1) < r
     p_b, R_b = ik.fk(ex.q_meas(), ex.x_meas())
     pw = pts[~robot] @ R_b.T + p_b
     c, inner, outer, hgt = bin_frame(ik, w, slot, ex.x_meas())
@@ -1033,6 +1037,7 @@ def _pick_and_place(ex, ik, i, body, slot, rng, t0, est=None):
         ik.attach(body, w.d)        # from here on the held part is planned as part of the robot
         Rp = w.d.site_xmat[w.grasp_site].reshape(3, 3)
         rel = Rp.T @ (part_center(w, body) - w.d.site_xpos[w.grasp_site])
+        rel = rel + Rp.T @ w.d.xmat[w.part_body[body]].reshape(3, 3) @ held_offset(w.part_sku[body])
     else:                           # the robot believes the part sits in the jaws as planned (+ the wrist shift)
         pos, R = pose_from_estimate(i, est)
         pos = pos + shift
@@ -1040,7 +1045,7 @@ def _pick_and_place(ex, ik, i, body, slot, rng, t0, est=None):
         rel_p, rel_R = Rg.T @ (pos - target), Rg.T @ R
         ik.attach(body, w.d, rel=(rel_p, rel_R))
         _, h = top_center(w, body, pos, R)
-        rel = rel_p + rel_R @ np.array([0.0, 0.0, h / 2])           # the part's centre in the pinch frame
+        rel = rel_p + rel_R @ (np.array([0.0, 0.0, h / 2]) + held_offset(w.part_sku[body]))   # its centre, pinch frame
     # the caddy rides on the carriage: if the bin is blocked here (e.g. under the open door), slide away first
     xc, s = C.printer_frame(i)
     q_drop = x_drop = pl = rp = None
@@ -1082,7 +1087,9 @@ def _pick_and_place(ex, ik, i, body, slot, rng, t0, est=None):
         hit = next((k for k in range(13) if ik.collides(ex.q, ex.x + (x_drop - ex.x) * k / 12, doors,
                                                          grip=g["width"] / 2)), None)
         if hit is None:
-            ex.move(None, x_drop, label="slide")
+            rec = {"t": round(float(w.d.time), 2), "dx": round(float(x_drop - ex.x), 4), "held": True, "pose": "hang"}
+            _door._run_phase(ex, rec, "slide", lambda: ex.move(None, x_drop, label="slide"), slide=True)
+            _door._log_move(w, rec)
         elif _door.VERBOSE:
             rob = w.arm_geoms | ik.held[0]
             print(f"    aisle slide blocked at {hit}/12: "
@@ -1180,7 +1187,8 @@ def _release_into_bin(ex, ik, body, slot, g, rp, rel, size=None, box=None):
         seen = ex.bin_seen = {}                          # the robot's last look into each bin (height maps)
     pre = None
     if BIN_CHECK:                                        # at the look pose (over the bin if it has none); the view is
-        pre = bin_look(ex, ik, slot, held=(rel, size / 2000 + 0.012))   # placed by the encoders: no need to settle
+        pre = bin_look(ex, ik, slot, held=held_mask(ik, body and w.part_sku[body], rel, size))   # (by the encoders:
+                                                                                     # no need to settle)
     if rp.get("down0"):
         pass                                             # straight down from the look pose (below, with the lowering)
     elif rp["q_look"] is not None and not transfer(ex, ik, rp["q"], rp["x"], {"grip": width / 2}):
@@ -1331,6 +1339,29 @@ def cartesian_via(ik, pts, R, x, q_seed, ignore=(), doors=None, n=8, grip=0.012,
                 return None
             qs.append(q.copy())
     return qs
+
+
+def held_offset(sku):
+    """Centre of what comes off the bed with the grasp, relative to the part's footprint centre (body frame, m): the
+    purge tab brings its prime line (C.PURGE_LINE_MM, off the tab's +x face), so tab + line (65 mm) are centred over
+    the waste tote together and fit it in any orientation (with the tab at the centre, a line held along a tote axis
+    would end on the wall)."""
+    if sku == "purge_tab":
+        return np.array([C.PURGE_LINE_MM[0] / 2000, 0.0, 0.0])
+    return np.zeros(3)
+
+
+def held_mask(ik, sku, rel, size):
+    """What the wrist look into a bin leaves out as the held part (pinch frame, bin_look `held`): a sphere of the
+    part's size around its centre; a purge tab: a sphere around the tab and a thin capsule along its prime line, from
+    the believed held pose (IK.attach), so the line hides neither the walls nor the bin around it."""
+    if sku != "purge_tab" or ik.held is None:
+        return rel, size / 2000 + 0.012
+    _, _, pr, Rr = ik.held
+    tx, tz = C.PURGE_TAB_MM[0] / 2000, C.PURGE_TAB_MM[2] / 2000
+    lz = C.PURGE_LINE_MM[2] / 2000
+    a, b = pr + Rr @ np.array([tx, 0.0, lz]), pr + Rr @ np.array([tx + C.PURGE_LINE_MM[0] / 1000, 0.0, lz])
+    return pr + Rr @ np.array([0.0, 0.0, tz]), size / 2000 + 0.012, (a, b, 0.012)
 
 
 def drop_height(w, body):

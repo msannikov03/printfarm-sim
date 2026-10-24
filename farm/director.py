@@ -6,6 +6,9 @@ doing (farm.action) and where the robot is:
               caddy bins the parts go to;
   * door    - the same idea a little wider, so the leaf's swing is in frame (also used when the carriage arrives
               after a short drive: the approach and the door opening stay one shot);
+  * purge   - a close-up of the purge tab pick (the grab tab with its prime line at the front of the bed, picked
+              first, into the waste tote): narrow lens from across the aisle, played near real time, for the first
+              PURGE_CLOSEUPS plates of a video; it lasts while the gripper is at the door (then the unload shot);
   * drive   - a high chase/tracking shot along the aisle, behind the carriage;
   * station - the bin hand-off and the packaging line (two rows: docking, box requests, the waste dump);
   * place   - two rows: the arm takes a large part from the tray and sets it into the box on the place lift;
@@ -46,12 +49,15 @@ SHORT_DRIVE = 0.9             # m: a shorter drive is filmed as the approach to 
 ROOM_MARGIN = (0.35, 0.15, 0.25)   # x, y, ceiling margin of a camera inside the room
 FRAME_X, FRAME_Y = (-0.85, 0.85), (-0.55, 0.72)   # usable part of the frame (tan units / half-size): clear of the HUD
 FOVY = {"unload": 58.0, "door": 60.0, "station": 52.0, "drive": 50.0, "follow": 45.0, "wide": 48.0, "place": 50.0,
-        "dump": 44.0, "seal": 52.0}
-CLEARANCE = {"dump": 0.12}        # per-shot camera clearance (default CAM_CLEARANCE): the dump camera sits close
+        "dump": 44.0, "seal": 52.0, "purge": 30.0}
+CLEARANCE = {"dump": 0.12, "purge": 0.15}   # per-shot camera clearance (default CAM_CLEARANCE): close-ups sit close
 DUMP_PUSH, DUMP_PUSH_S = 0.3, 2.5   # dump shot: starts this much farther out, pushes in over this many seconds
 DUMP_SLOWMO, DUMP_SLOWMO_S = 0.35, 2.0   # ... and the first seconds (the drop) play at this fraction of the speed
 DIST_OK = {"unload": (0.9, 1.8), "door": (1.1, 2.2), "station": (1.7, 3.2), "place": (1.0, 2.0), "dump": (0.3, 0.7),
-           "seal": (1.3, 2.6)}
+           "seal": (1.3, 2.6), "purge": (0.45, 1.0)}
+PURGE_CLOSEUPS = 3            # purge close-ups per video (the first plates' purge picks)
+PURGE_SLOWMO = 0.15           # ... played at this fraction of the recorder's speed (time-lapse 8x -> ~1.2x real time)
+PURGE_AT_DOOR = 0.14          # ... while the pinch is at most this far in front of the door plane (m)
 _TOTE = re.compile(r"tote (o\d|waste)")
 _ACT = re.compile(r"P(\d+): (.+)")
 _DIRS = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]
@@ -159,6 +165,8 @@ class Director:
             from farm import scene
             self.stn = scene.station_layout()
         self._gid = np.zeros(1, np.int32)
+        self._last_action, self.n_purge = None, 0     # purge picks seen so far (the first PURGE_CLOSEUPS get close-ups)
+        self._purge_phase = None                      # current purge pick: "approach" -> "at" the door -> "left"
 
     # ------------------------------------------------------------------ geometry helpers
     def _site(self, k):
@@ -272,7 +280,49 @@ class Director:
             return "door", i, None
         if "door" in rest:
             return "door", i, None
+        if rest.startswith("purge") and self.n_purge <= PURGE_CLOSEUPS and self._purge_phase != "left":
+            return "purge", i, None
         return "unload", i, None
+
+    def _track_purge(self):
+        """Count purge picks (an action that turns to "P<n>: purge -> ..." is a new one) and follow the current one:
+        the close-up runs from the start of the pick until the gripper has been in the doorway and left it."""
+        a = getattr(self.farm, "action", "") or ""
+        mt = _ACT.match(a)
+        purge = bool(mt) and mt.group(2).startswith("purge")
+        if a != self._last_action and purge:
+            self.n_purge += 1
+            self._purge_phase = "approach"
+        self._last_action = a
+        if not purge:
+            self._purge_phase = None
+            return
+        i = int(mt.group(1)) - 1
+        if not 0 <= i < C.N_PRINTERS:
+            return
+        at = self._at_door(i)
+        if self._purge_phase == "approach" and at:
+            self._purge_phase = "at"
+        elif self._purge_phase == "at" and not at:
+            self._purge_phase = "left"
+
+    def _at_door(self, i):
+        """Is the gripper in the doorway of printer i (inside, or at most PURGE_AT_DOOR in front of the door)?"""
+        _, s = C.printer_frame(i)
+        return s * self.pinch()[1] - C.AISLE_HALF > -PURGE_AT_DOOR
+
+    def _purge_pts(self, i):
+        """(tab, middle of the prime line) of printer i's plate (world): the slicer's tab position (plate record),
+        front-centre by default; the line runs along the bed's +x from the tab."""
+        pt = None
+        try:
+            pt = self.farm.printers[i].plate["purge_tab"]["center_mm"]
+        except (AttributeError, IndexError, KeyError, TypeError):
+            pass
+        cx, cy = pt if pt is not None else (C.BED_MM[0] / 2, C.PURGE_STRIP_MM / 2)
+        tab = np.array(C.bed_mm_to_world(i, cx, cy)) + [0, 0, C.PURGE_TAB_MM[2] / 2000]
+        mid = np.array(C.bed_mm_to_world(i, cx + (C.PURGE_TAB_MM[0] + C.PURGE_LINE_MM[0]) / 2, cy))
+        return tab, mid
 
     # ------------------------------------------------------------------ shot targets / candidates
     def _bed(self, i, dz=0.025):
@@ -280,6 +330,10 @@ class Director:
 
     def _targets(self, kind, i):
         """[(point, weight, robot_ok)] the shot should show; the first is the main one (re-checked while it runs)."""
+        if kind == "purge":
+            tab, mid = self._purge_pts(i)
+            opening = np.array(C.local_to_world(i, 0.0, 0.0, 0.18))
+            return [(tab, 2.0, 0.6), (mid, 1.0, 0.7), (self.pinch(), 1.0, 0.7), (opening, 0.3, 1.0)]
         if kind == "unload":
             _, s = C.printer_frame(i)
             bed = self._bed(i)
@@ -323,6 +377,11 @@ class Director:
 
     def _lookat(self, shot, nominal=False):
         kind, i = shot.kind, shot.key[1]
+        if kind == "purge":                            # the tab and its line, drifting a little with the gripper
+            tab, mid = self._purge_pts(i)
+            base = 0.65 * tab + 0.35 * mid
+            off = self.pinch() - base
+            return base if nominal else base + 0.2 * off * min(1.0, 0.25 / max(np.linalg.norm(off), 1e-6))
         if kind == "unload":                           # bed, caddy, and a little of the gripper
             bed, bins = self._bed(i, 0.04), self.bins()
             base = 0.62 * bed + 0.38 * bins
@@ -360,7 +419,14 @@ class Director:
     def _candidates(self, kind, i):
         """[(camera position, preference)] for the fixed-position shots."""
         out = []
-        if kind in ("unload", "door"):
+        if kind == "purge":                            # across the aisle, low and close, looking in through the door
+            xc, s = C.printer_frame(i)
+            for dx in (0.12, 0.25, 0.38, 0.5, -0.3, -0.45):            # dx > 0: away from the hinge
+                for depth in (0.3, 0.45, 0.55, 0.65):
+                    for z in (0.98, 1.1, 1.25, 1.4):
+                        out.append((np.array([xc + s * dx, s * (C.AISLE_HALF - depth), z]),
+                                    (0.4 if dx > 0 else 0.0) - 0.15 * abs(z - 1.1)))
+        elif kind in ("unload", "door"):
             xc, s = C.printer_frame(i)
             # depth: from the door plane across the aisle; two rows: stay inside the aisle (not over the other row)
             depths = (0.55, 0.67, 0.78) if C.N_ROWS == 2 else (0.60, 0.80, 1.00)
@@ -502,7 +568,7 @@ class Director:
             return self._pick_wide(t)
         if kind == "drive":
             return self._pick_drive(key, t) or self._fallback(t, key)
-        if kind in ("unload", "door", "station", "place", "dump", "seal"):
+        if kind in ("unload", "door", "station", "place", "dump", "seal", "purge"):
             return self._pick_fixed(kind, key, t, exclude) or self._fallback(t, key)
         return self._fallback(t, key)
 
@@ -518,6 +584,7 @@ class Director:
     def update(self):
         """Advance one video frame; returns (lookat, dist, az, el, fovy, cutaway)."""
         t = self.frame * self.dt
+        self._track_purge()
         kind, key = self._want()
         shot = self.shot
         if shot is None:
@@ -527,6 +594,12 @@ class Director:
             if shot.kind == "wide":
                 if age >= self.wide_s:
                     self._cut(self._new_shot(kind, key, t))
+            elif key != shot.key and kind == "purge":
+                # the purge close-up does not wait for min_shot_s (at 8x the whole pick would be over before the cut),
+                # and it is cut to only once a fixed angle is found (no fallback flash; retried every 3rd frame)
+                alt = self._pick_fixed(kind, key, t) if self.frame % 3 == 0 else None
+                if alt is not None:
+                    self._cut(alt)
             elif key != shot.key and kind != "idle" and age >= self.min_shot_s:
                 due = self.wide_every_s and t - self.last_wide >= self.wide_every_s and kind != "unload"
                 self._cut(self._new_shot("wide" if due else kind, key, t))
@@ -561,6 +634,8 @@ class Director:
         s = self.shot
         if s is not None and s.kind == "dump" and (self.frame - 1) * self.dt - s.t0 < DUMP_SLOWMO_S:
             return DUMP_SLOWMO
+        if s is not None and s.kind == "purge":
+            return PURGE_SLOWMO
         return 1.0
 
     def __call__(self, w):

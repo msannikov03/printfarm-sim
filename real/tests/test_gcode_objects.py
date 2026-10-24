@@ -132,3 +132,38 @@ def test_creality_purge_conventions():
                     "; FLUSH_START", "G1 X5 Y20 E25", "; FLUSH_END", "G1 X10 Y20 E26 ; ordinary"])
     seg = parse_segments(g)
     assert seg.purge.tolist() == [True, True, False]
+
+
+@pytest.mark.parametrize("style", ["orca", "orca_comments", "m486", "cura", "none"])
+def test_purge_tab_layout_found_and_picked_first(style):
+    """docs/purge.md layout: the start G-code primes along the front strip into a 10 x 20 x 20 mm purge tab object.
+    The tab is the purge object (by its name when labelled, else by the prime line's end) and is picked first."""
+    from real.synth_gcode import TAB_MM, purge_tab_part
+    plan = extract(text=make_gcode(opts=SynthOpts(style=style, purge_tab=True)))
+    tab = purge_tab_part()
+    by = {o["name"]: o for o in plan["objects"]}
+    assert len(plan["objects"]) == len(DEFAULT_PARTS) + 1
+    assert plan["purge_object"] == plan["pick_order"][0] == (tab.name if style != "none" else "part_1")
+    o = by[plan["purge_object"]]
+    assert [p["role"] for p in plan["objects"]].count("purge") == 1 and o["role"] == "purge"
+    assert np.allclose(o["center_mm"], tab.center, atol=0.6)
+    assert o["height_mm"] == pytest.approx(TAB_MM[2], abs=0.05)
+    assert sorted(o["footprint_mm"]) == pytest.approx(sorted(TAB_MM[:2]), abs=1.0)
+    assert np.allclose(plan["prime_line_end_mm"], tab.center, atol=0.01)      # the line ends under the tab
+    assert all(by[n]["role"] == "part" for n in plan["pick_order"][1:])
+
+
+def test_purge_tab_prime_line_is_purge_and_not_an_object():
+    seg = parse_segments(make_gcode(opts=SynthOpts(style="orca", purge_tab=True)))
+    assert seg.purge.sum() == 1                                      # the one front-strip prime line
+    plan = extract(text=make_gcode(opts=SynthOpts(style="orca", purge_tab=True)), force_cluster=True)
+    tab = [o for o in plan["objects"] if o["role"] == "purge"]
+    assert len(tab) == 1 and tab[0]["footprint_mm"][0] < 25.0       # the tab alone, not tab + 55 mm line
+
+
+def test_purge_tab_from_firmware_objects_by_name():
+    from real.gcode_objects import plan_from_firmware_objects
+    objs = [{"name": "cube", "center": [105, 110], "polygon": [[95, 100], [115, 100], [115, 120], [95, 120]]},
+            {"name": "purge_tab", "center": [110, 13], "polygon": [[105, 3], [115, 3], [115, 23], [105, 23]]}]
+    plan = plan_from_firmware_objects(objs, height_mm=20.0)
+    assert plan["purge_object"] == "purge_tab" and plan["pick_order"] == ["purge_tab", "cube"]

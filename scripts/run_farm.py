@@ -1,5 +1,9 @@
 """Run the whole cell: python scripts/run_farm.py --hours 6 --plates 12 --video --speed 8 --seed 0
 
+--backlog N: a morning order backlog. N orders (the order stream's line mix) are already queued at t=0, as if they
+came in overnight, so the first wave of plates can fill every printer. Without it, orders arrive at the stream's
+rate (--scale) and idle printers take plates in index order, so a short run may never reach the last printers.
+
 Station only (two rows), without printing:
   --station-demo   two orders (one package with a large part; one order shipped as two packages) are put on the
                    caddy as if just unloaded, then the robot ships them (video: --video, real-time-ish --speed 1.5)
@@ -43,6 +47,8 @@ ap.add_argument("--realism", default="ideal", choices=["ideal", "realistic", "ha
 ap.add_argument("--station-demo", action="store_true", help="two rows: station only, two demo orders")
 ap.add_argument("--station-bench", type=int, default=0, help="two rows: station only, N rounds of random orders")
 ap.add_argument("--times", default="runs/station_times.json", help="--station-bench: where to write the step times")
+ap.add_argument("--backlog", type=int, default=0,
+                help="morning order backlog: N orders already queued at t=0 (so every printer starts in the first wave)")
 a = ap.parse_args()
 
 out = pathlib.Path(a.out)
@@ -147,16 +153,21 @@ if station_only:
     if a.station_bench:
         farm.station.save_times(a.times)
 else:
+    for _ in range(a.backlog):         # morning order backlog: received overnight, queued before the day starts
+        farm._new_order(0.0)
     res = farm.run(a.hours, max_plates=a.plates)
     farm.finish()                      # boxes still on the conveyor reach their lanes
     res = farm.summary()
 res["wall_s"] = time.time() - t0
+res["backlog_orders"] = a.backlog
+res["printers_unloaded"] = len({e[1] for e in farm.events if e[2] == "unloaded"})
 if farm.station is not None:
     farm.station.save_times(out / f"station_times_s{a.seed}.json")
 if ex.rec:
     ex.rec.close()
 (out / f"summary_s{a.seed}.json").write_text(json.dumps(res, indent=1, default=float))
 (out / f"parts_s{a.seed}.json").write_text(json.dumps(farm.part_log, indent=1, default=float))
+(out / f"moves_s{a.seed}.json").write_text(json.dumps(getattr(w, "transfer_log", []), indent=0, default=float))
 (out / f"events_s{a.seed}.json").write_text(json.dumps(farm.events, indent=1, default=str))
 if hasattr(view, "cuts"):          # shot list (video time s, kind, key, label): handy for cutting highlights
     (out / f"camera_s{a.seed}.json").write_text(json.dumps(view.cuts, indent=1, default=str))

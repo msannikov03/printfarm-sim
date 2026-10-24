@@ -21,8 +21,8 @@ the print head.
 
 **Swing.** `plan_door()` searches for one continuous whole-body arc (6 arm joints + rail) that drags the bar from the
 current angle to the target in 14 steps. Every sample must have a collision-free IK solution, and the score is the
-worst manipulability × joint-limit margin along the arc. The arm folds below the door line (`LOW_TUCK`), so the
-carriage can pass under the open leaf. If no single arc exists, it falls back to two arcs with a regrasp at
+worst manipulability × joint-limit margin along the arc. The arm folds below the door line (`LOW_TUCK`) when a
+carriage move passes under the open leaf; other moves slide with the arm upright (`transfer`, DESIGN.md). If no single arc exists, it falls back to two arcs with a regrasp at
 50/35/65°, joined by a tucked carriage slide. In the current layout the single arc is always found.
 
 **Grasp geometry.** The jaws close along the bar's direction of travel, so the pads push the bar along the arc.

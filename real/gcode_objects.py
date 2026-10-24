@@ -16,6 +16,11 @@ Two paths:
 Purge / prime lines and skirts are excluded: moves before the first layer marker (start G-code),
 moves commented purge/prime/intro/wipe, ;TYPE:Skirt / prime tower, and geometrically thin lines.
 
+Purge tab (docs/purge.md): a small printed object the start G-code primes into, picked first into the waste bin
+with the prime line fused to it. It is the object named like one (PURGE_OBJECT, e.g. EXCLUDE_OBJECT_DEFINE
+NAME=purge_tab), else the object whose footprint holds the end of the prime line (the unlabelled fallback):
+role "purge" (other objects: "part"), plan["purge_object"], first in the pick order.
+
 Bed frame = slicer frame: mm, origin at the bed's front-left corner (x right, y towards the back)
 for Creality K1/K2/Ender machines. Pick order is nearest-to-robot first (default robot in front).
 
@@ -48,6 +53,7 @@ KNOWN_BEDS = {
 
 PURGE_WORDS = re.compile(r"\b(purge|prime|priming|intro|wipe|nozzle clean|draw the (first|second) line|flush)", re.I)
 SKIP_TYPES = re.compile(r"skirt|prime.?tower|wipe.?tower|custom", re.I)
+PURGE_OBJECT = re.compile(r"purge|prime.?tab|calibration.?tab", re.I)     # object names of a purge tab
 LAYER_MARK = re.compile(r"^;\s*(LAYER_CHANGE|LAYER:\s*-?\d+|CHANGE_LAYER|layer num/total_layer_count)", re.I)
 NUM = r"[-+]?(?:\d+\.?\d*|\.\d+)"
 WORD = re.compile(rf"([A-Za-z])\s*({NUM})")
@@ -472,6 +478,44 @@ def pick_order(objs: list[dict], bed, robot_side: str = "front", row_mm: float =
     return order
 
 
+def prime_line_end(seg: Segments):
+    """End point (x, y) of the last prime / purge extrusion (commented, or in the start G-code), or None."""
+    pr = seg.purge | (seg.region == 1) if seg.has_layer_markers else seg.purge
+    k = np.flatnonzero(pr)
+    return None if not len(k) else seg.p1[k[-1]].astype(float)
+
+
+def _inside(pt, poly, tol_mm: float) -> bool:
+    """Point in (or within tol_mm of) a convex polygon given in either winding."""
+    p = np.asarray(poly, float)
+    if len(p) < 3:
+        return False
+    e = np.roll(p, -1, axis=0) - p
+    v = np.asarray(pt, float) - p
+    d = (e[:, 0] * v[:, 1] - e[:, 1] * v[:, 0]) / np.maximum(np.hypot(e[:, 0], e[:, 1]), 1e-9)   # + = left of edge
+    return bool(np.all(d >= -tol_mm) or np.all(d <= tol_mm))
+
+
+def mark_purge(objs: list[dict], line_end=None, tol_mm: float = 2.0):
+    """Tag each object's role ("purge" / "part"): the purge tab is the object named like one, else the one whose
+    footprint holds the prime line's end. Returns its name or None."""
+    for o in objs:
+        o["role"] = "part"
+    cand = [o for o in objs if PURGE_OBJECT.search(str(o.get("name", "")))]
+    if not cand and line_end is not None:
+        cand = [o for o in objs if _inside(line_end, o.get("polygon_mm") or [], tol_mm)]
+    if not cand:
+        return None
+    cand[0]["role"] = "purge"
+    return cand[0]["name"]
+
+
+def _order(objs, bed, robot_side, purge):
+    """Pick order: the purge tab first (into the waste bin, its prime line with it), then the parts."""
+    rest = pick_order([o for o in objs if o["name"] != purge], bed, robot_side)
+    return ([purge] if purge else []) + rest
+
+
 def extract(path=None, *, text=None, bed=None, printer_model=None, robot_side="front",
             force_cluster=False) -> dict:
     """Pick plan dict from a G-code file (path) or its contents (text)."""
@@ -487,10 +531,13 @@ def extract(path=None, *, text=None, bed=None, printer_model=None, robot_side="f
     else:
         note = ""
     n_purge = int((seg.purge | (seg.region == 1)).sum()) if seg.has_layer_markers else int(seg.purge.sum())
+    end = prime_line_end(seg)
+    purge = mark_purge(objs, end)
     return dict(
         source=None if path is None else str(path),
         bed_mm=[bw, bh], bed_source=bsrc, method=method, labelled=method != "cluster",
-        robot_side=robot_side, objects=objs, pick_order=pick_order(objs, (bw, bh), robot_side),
+        robot_side=robot_side, objects=objs, pick_order=_order(objs, (bw, bh), robot_side, purge),
+        purge_object=purge, prime_line_end_mm=None if end is None else np.round(end, 2).tolist(),
         excluded=excluded, n_extrusion_segments=int(len(seg.z)), n_purge_or_start_segments=n_purge,
         note=note)
 
@@ -509,9 +556,10 @@ def plan_from_firmware_objects(objs: list, bed=(220.0, 220.0), height_mm: float 
         else:
             continue
         out.append(dict(name=str(o.get("name") or f"object_{i}"), **g, height_mm=height_mm, source="firmware"))
+    purge = mark_purge(out)                      # (by name only: the firmware does not report the prime line)
     return dict(source="firmware objects", bed_mm=[float(bed[0]), float(bed[1])], bed_source="cli/default",
                 method="firmware_objects", labelled=True, robot_side=robot_side, objects=out,
-                pick_order=pick_order(out, bed, robot_side), excluded=[], n_extrusion_segments=0,
+                pick_order=_order(out, bed, robot_side, purge), purge_object=purge, excluded=[], n_extrusion_segments=0,
                 n_purge_or_start_segments=0, note=f"heights unknown: assumed {height_mm} mm for every part")
 
 
@@ -540,9 +588,10 @@ def print_plan(plan: dict, file=sys.stdout):
     for i, n in enumerate(plan["pick_order"], 1):
         o = by[n]
         h = o["height_mm"]
+        tag = "  <- purge tab: waste bin (prime line attached)" if o.get("role") == "purge" else ""
         print(f"  {i}. {n:<24} c=({o['center_mm'][0]:6.1f},{o['center_mm'][1]:6.1f}) "
               f"fp={o['footprint_mm'][0]:5.1f}x{o['footprint_mm'][1]:<5.1f} yaw={o['yaw_deg']:6.1f} "
-              f"h={'?' if h is None else f'{h:.1f}'}", file=file)
+              f"h={'?' if h is None else f'{h:.1f}'}{tag}", file=file)
     for e in plan["excluded"]:
         print(f"  excluded: {e['reason']} at ({e['center_mm'][0]:.1f},{e['center_mm'][1]:.1f}) "
               f"{e['footprint_mm'][0]:.1f}x{e['footprint_mm'][1]:.1f} mm", file=file)

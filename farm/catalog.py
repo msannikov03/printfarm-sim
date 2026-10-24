@@ -28,6 +28,11 @@ BED_FRONT_GAP = 0.05                  # door plane -> bed front edge (m)
 BED_ZL = 0.10                         # bed surface at the unload height (end G-code); M2 may change
 PURGE_STRIP_MM = 26.0                 # front strip of the bed reserved for the purge tab
 PURGE_TAB_MM = (10.0, 20.0, 20.0)     # grab tab at the end of the prime line, sized for the YAM jaws
+PURGE_LINE_MM = (55.0, 4.0, 0.6)      # prime (calibration) line: length along the front strip, width, height. It runs
+                                      # along the bed's +x from the tab's +x face and is fused to the tab's first layer
+                                      # (docs/purge.md). 0.6 mm (a real prime line: 0.2-0.6) stays well under
+                                      # perception's RAISED_MM (1.5 mm): the chamber camera sees bed there (at 1.2 mm,
+                                      # noise lifted part of a 55 mm line into a "debris" blob beside the tab)
 PURGE_TAB_CLEAR_MM = 20.0             # no part within this of the tab: room for the open jaws around it
 REJECT_TRAY = (0.15, 0.020, 0.030)    # per-printer reject tray in the front gap under the bed edge: half-width,
                                       # half-depth, wall height (m). Parts the robot cannot pick are raked into
