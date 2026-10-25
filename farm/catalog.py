@@ -106,6 +106,8 @@ class SKU:
     top_mm: tuple = ()
     grasp_mm: tuple = ()      # real parts: (cx, cy, wx, wy) where the jaws close (centre, opening along x / y), from
                               # the part's cross-sections at the grasp heights (the slicer's layers there)
+    grasp_alts: tuple = ()    # real parts: grasps searched over the part's own layers (real.mesh_io.grasp_candidates),
+                              # tried when the grasp above finds none (plan/mesh_grasp.py); primitives have none
     pool: int = 0             # pooled bodies of this SKU in the scene (0: farm.scene.POOL_PER_SKU)
 
     @property

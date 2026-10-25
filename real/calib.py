@@ -63,6 +63,7 @@ class BedCalib:
     points: list = field(default_factory=list)
     created: str = field(default_factory=lambda: time.strftime("%Y-%m-%d %H:%M:%S"))
     notes: str = ""
+    checks: list = field(default_factory=list)    # held-out control points (touched, not in the fit): errors in mm
 
     @property
     def R(self):
@@ -101,7 +102,8 @@ class BedCalib:
         return dict(T_robot_bed=np.round(self.T_robot_bed, 6).tolist(), method=self.method,
                     rms_mm=self.rms_mm, bed_mm=list(self.bed_mm), points=self.points, created=self.created,
                     notes=self.notes, frames="p_robot[m] = R @ p_bed[mm]/1000 + t; bed = slicer frame, "
-                                         "robot = SO-101 MJCF base (x fwd, y left, z up)")
+                                         "robot = SO-101 MJCF base (x fwd, y left, z up)",
+                    **({"checks": self.checks} if self.checks else {}))
 
     def save(self, path=CALIB_JSON) -> Path:
         path = Path(path)
@@ -113,7 +115,7 @@ class BedCalib:
         d = json.loads(Path(path).read_text())
         return cls(T_robot_bed=np.array(d["T_robot_bed"], float), method=d.get("method", "?"),
                    rms_mm=d.get("rms_mm"), bed_mm=d.get("bed_mm", [220, 220]), points=d.get("points", []),
-                   created=d.get("created", ""), notes=d.get("notes", ""))
+                   created=d.get("created", ""), notes=d.get("notes", ""), checks=d.get("checks", []))
 
 
 def from_base_pose(base_in_bed_mm, yaw_deg: float, bed_mm=(220, 220), method="manual", notes="") -> BedCalib:
@@ -153,6 +155,23 @@ def fit_touch(bed_pts_mm, robot_pts_m, bed_mm=(220, 220), tip_above_bed_mm: floa
     tilt = math.degrees(math.acos(np.clip(R[2, 2], -1, 1)))
     c.notes = f"bed plane tilt vs robot base {tilt:.1f} deg"
     return c
+
+
+def held_out_errors(c: BedCalib, bed_pts_mm, robot_pts_m, tip_above_bed_mm: float = 0.0, joints=None) -> list:
+    """Held-out control points: touched like the fit points but not used in the fit. For each, the fitted
+    calibration maps the touched tip into the bed frame; the error is that minus the point touched (mm, bed axes:
+    x, y in the bed plane, z up). A low fit residual does not prove the calibration; this error is what to compare
+    with the task tolerance."""
+    out = []
+    for k, (b, q) in enumerate(zip(bed_pts_mm, robot_pts_m)):
+        b = np.asarray(b, float)
+        b = np.r_[b[:2], tip_above_bed_mm] if len(b) == 2 else b
+        e = c.robot_to_bed(np.asarray(q, float)) - b
+        out.append(dict(bed_mm=b.round(3).tolist(), robot_m=np.asarray(q, float).round(6).tolist(),
+                        error_mm=e.round(3).tolist(), error_xy_mm=round(float(np.hypot(e[0], e[1])), 3),
+                        error_3d_mm=round(float(np.linalg.norm(e)), 3),
+                        **({"lerobot": joints[k]} if joints is not None else {})))
+    return out
 
 
 # ----------------------------------------------------------------------------- Method B (ArUco)
@@ -246,18 +265,21 @@ def _jog(arm, kin, start_tip, input_fn, label):
 
 
 def touch_session(arm, bed_pts, kin=None, samples: int = 10, input_fn=input, tip_above_bed_mm=0.0, bed_mm=(220, 220),
-                  jog_guess: "BedCalib | None" = None):
+                  jog_guess: "BedCalib | None" = None, check_pts=()):
     """Interactive touch-off. Hand-guide mode (default): torque off, push the fixed-jaw tip onto each point.
     Jog mode (jog_guess = a rough calibration, e.g. nominal or tape-measured): torque on, the arm goes 15 mm
-    above each point via the guess and you nudge it down with typed mm steps. Returns BedCalib."""
+    above each point via the guess and you nudge it down with typed mm steps. check_pts: held-out control points,
+    touched after the fit points the same way and left out of the fit (BedCalib.checks). Returns BedCalib."""
     from real.so101 import FIXED_TIP, SO101
     kin = kin or SO101()
     robot_pts, joints = [], []
+    n_fit, todo = len(bed_pts), list(bed_pts) + list(check_pts)
     if jog_guess is None:
         arm.torque(False)
     try:
-        for i, (x, y) in enumerate(bed_pts, 1):
-            label = f"[{i}/{len(bed_pts)}] bed point ({x:.0f}, {y:.0f}) mm"
+        for i, (x, y) in enumerate(todo, 1):
+            kind = "held-out check point" if i > n_fit else "bed point"
+            label = f"[{i}/{len(todo)}] {kind} ({x:.0f}, {y:.0f}) mm"
             if jog_guess is None:
                 input_fn(f"{label}: hand-guide the FIXED jaw tip onto it, hold still, press Enter ")
                 p, lr = _record(arm, kin, samples, hint=(x, y))
@@ -274,7 +296,10 @@ def touch_session(arm, bed_pts, kin=None, samples: int = 10, input_fn=input, tip
     finally:
         if jog_guess is None:
             arm.torque(True)
-    return fit_touch(bed_pts, robot_pts, bed_mm=bed_mm, tip_above_bed_mm=tip_above_bed_mm, joints=joints)
+    c = fit_touch(bed_pts, robot_pts[:n_fit], bed_mm=bed_mm, tip_above_bed_mm=tip_above_bed_mm, joints=joints[:n_fit])
+    if check_pts:
+        c.checks = held_out_errors(c, check_pts, robot_pts[n_fit:], tip_above_bed_mm, joints[n_fit:])
+    return c
 
 
 def print_calib(c: BedCalib):
@@ -285,6 +310,9 @@ def print_calib(c: BedCalib):
     corners = [(0, 0), (c.bed_mm[0], 0), (c.bed_mm[0], c.bed_mm[1]), (0, c.bed_mm[1])]
     for b, r in zip(corners, c.bed_to_robot(corners)):
         print(f"  bed corner {b} -> robot ({r[0] * 1000:.0f}, {r[1] * 1000:.0f}, {r[2] * 1000:.0f}) mm")
+    for p in c.checks:
+        print(f"  held-out {p['bed_mm']}: error {p['error_mm']} mm (bed x, y, z), in-plane {p['error_xy_mm']} mm, "
+              f"3D {p['error_3d_mm']} mm")
     if c.rms_mm is not None and c.rms_mm > 5:
         print("  WARNING: RMS > 5 mm - re-touch the points or check joint offsets/signs (README troubleshooting)")
 
@@ -309,6 +337,9 @@ def main(argv=None):
     t.add_argument("--robot-id", default="follower", help="LeRobot calibration id used with lerobot-calibrate")
     t.add_argument("--calibration-dir", help="LeRobot calibration dir if not the default")
     t.add_argument("--points", nargs="+", default=["20,20", "200,20", "200,200", "20,200"], help="bed points x,y mm")
+    t.add_argument("--check", nargs="+", default=[], metavar="X,Y",
+                   help="held-out control points x,y mm: touched after the fit points, not used in the fit; their "
+                        "error is the one to compare with the task tolerance")
     t.add_argument("--bed", default="220x220")
     t.add_argument("--tip-above-bed", type=float, default=0.0, help="mm, e.g. 0.1 if touching a paper sheet")
     t.add_argument("--dry-run", action="store_true", help="simulated hand on a nominal placement (no hardware)")
@@ -354,7 +385,7 @@ def main(argv=None):
                 if a.dry_run:
                     inp = _scripted_jog()
             c = touch_session(arm, _parse_pts(a.points), input_fn=inp, tip_above_bed_mm=a.tip_above_bed, bed_mm=bed,
-                              jog_guess=guess)
+                              jog_guess=guess, check_pts=_parse_pts(a.check))
         finally:
             arm.disconnect()
     elif a.cmd == "fit":

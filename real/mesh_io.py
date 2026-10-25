@@ -436,6 +436,207 @@ def grasp_section(v, f, heights, centre=(0.0, 0.0), band_mm=6.0):
     return None
 
 
+# ---- grasp search over the part's own layers (the fallback of plan.unload's fixed-height grasp, plan/mesh_grasp.py)
+GRASP_STEP_MM = 0.6      # a section every 3 slicer layers (0.2 mm)
+ROW_MM = 1.0             # section outlines are binned in rows this wide across the jaw axis
+# a finger of the parallel gripper, in the plane normal to the jaw axis (YAM, measured in the planning model): it ends
+# FINGER_END_MM past the pinch point (the pad centre), is 2 x FINGER_HALF_MM wide there (pad and capsules) and is
+# checked FINGER_LEN_MM back from its end (higher up, the wrist and the palm are left to the planner's collision check)
+FINGER_END_MM = 10.0
+FINGER_HALF_MM = 7.0
+FINGER_LEN_MM = 60.0
+PAD_LEN_MM = 40.0        # ... and grips with its first PAD_LEN_MM (the pad)
+
+
+def mesh_centroid(v: np.ndarray, f: np.ndarray) -> np.ndarray:
+    """Volume centroid of a closed mesh (mm); the vertex mean for a mesh without volume."""
+    a, b, c = (v[f[:, k]] for k in range(3))
+    vol = np.einsum("ij,ij->i", a, np.cross(b, c)) / 6.0
+    if abs(vol.sum()) < 1e-9:
+        return v.mean(0)
+    return (vol[:, None] * (a + b + c) / 4.0).sum(0) / vol.sum()
+
+
+def _sections(v, f, zs):
+    """section_segments at every height in zs (the triangles are gathered once)."""
+    t = v[f]
+    zlo, zhi = t[:, :, 2].min(1), t[:, :, 2].max(1)
+    out = []
+    for z in zs:
+        s = (zlo < z) & (zhi > z)
+        out.append(section_segments(t[s].reshape(-1, 3), np.arange(3 * int(s.sum())).reshape(-1, 3), z)
+                   if s.any() else np.zeros((0, 2, 2)))
+    return out
+
+
+def _row_extents(seg, w0, n_rows, row=ROW_MM):
+    """Extent along u (column 0) of a section outline (segments in (u, w) coordinates) in rows of width `row` across
+    it, starting at w0: (lo, hi) per row, +inf / -inf where a row holds no outline."""
+    lo, hi = np.full(n_rows, np.inf), np.full(n_rows, -np.inf)
+    if not len(seg):
+        return lo, hi
+    p, q = seg[:, 0], seg[:, 1]
+    wa, wb = np.minimum(p[:, 1], q[:, 1]), np.maximum(p[:, 1], q[:, 1])
+    r0 = np.clip(np.floor((wa - w0) / row).astype(int), 0, n_rows - 1)
+    r1 = np.clip(np.floor((wb - w0) / row).astype(int), 0, n_rows - 1)
+    cnt = r1 - r0 + 1
+    k = np.repeat(np.arange(len(seg)), cnt)
+    rows = r0[k] + np.arange(int(cnt.sum())) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+    P, Q = p[k], q[k]
+    d = Q[:, 1] - P[:, 1]
+    flat = np.abs(d) < 1e-12
+    dd = np.where(flat, 1.0, d)
+    b0 = w0 + rows * row
+    t0, t1 = (b0 - P[:, 1]) / dd, (b0 + row - P[:, 1]) / dd
+    ta = np.where(flat, 0.0, np.clip(np.minimum(t0, t1), 0, 1))
+    tb = np.where(flat, 1.0, np.clip(np.maximum(t0, t1), 0, 1))
+    ua, ub = P[:, 0] + ta * (Q[:, 0] - P[:, 0]), P[:, 0] + tb * (Q[:, 0] - P[:, 0])
+    np.minimum.at(lo, rows, np.minimum(ua, ub))
+    np.maximum.at(hi, rows, np.maximum(ua, ub))
+    return lo, hi
+
+
+def _window(x, a, b, fill, op):
+    """out[j] = op(x[j + a .. j + b]) (rows outside x count as `fill`); a <= b, integers."""
+    n = len(x)
+    pad = np.concatenate([np.full(max(-a, 0), fill), x, np.full(max(b, 0), fill)])
+    start = a + max(-a, 0)
+    view = np.lib.stride_tricks.sliding_window_view(pad, b - a + 1)
+    return op(view[start:start + n], axis=1)
+
+
+def _strip_extents(lo, hi, dz, sa, ca, b, end, length=FINGER_LEN_MM):
+    """One layer of the finger column: the extent along the jaw axis of the material (row extents lo / hi of the
+    layer) inside the finger's strip, for every finger position across the jaw axis (the rows). The strip: within b
+    of the finger axis, from `end` past the finger's end to `length` back from it, in the plane normal to the jaw
+    axis; the finger tilted by asin(sa) from vertical and leaning toward +w; dz: the layer height above the finger's
+    end. -> (lo, hi) per finger end row (+inf / -inf: no material), or None (the strip misses the layer)."""
+    A, B = ((-b - dz * sa) / ca, (b - dz * sa) / ca) if ca > 1e-9 else (-np.inf, np.inf)    # across the finger axis
+    if sa > 1e-9:                                                                            # along it
+        A, B = max(A, (dz * ca - length) / sa), min(B, (dz * ca + end) / sa)
+    elif not -end <= dz <= length:
+        return None
+    if A > B:
+        return None
+    ra, rb = int(math.floor(A / ROW_MM)), int(math.ceil(B / ROW_MM))
+    return _window(lo, ra, rb, np.inf, np.min), _window(hi, ra, rb, -np.inf, np.max)
+
+
+def grasp_candidates(v, f, height=None, dirs=None, tilts=(50, 65, 80), stroke_mm=70.0, open_mm=74.0, tip_mm=1.8,
+                     min_cover_mm=5.0, cover_frac=0.6, touch_mm=0.5, clear_mm=5.5, step_mm=GRASP_STEP_MM,
+                     min_touch_mm=2.0, n_keep=40, prior=None):
+    """Grasp search over a part's own layers: where a parallel-jaw gripper can close on it, from its sections every
+    step_mm (the slicer's layers there). v, f: the mesh in the part's own frame (bed at z = 0, mm).
+
+    Searched: the jaw axis (dirs: [(yaw_deg, lean)] in the part frame, default every 15 deg, both leans; lean = +1 / -1:
+    the approach leans toward +/- the horizontal normal of the jaw axis, i.e. into the printer), the approach tilt
+    from vertical about the jaw axis (tilts, deg), where the finger lies across the jaw axis (every ROW_MM) and the
+    height of its lowest point (tip_mm up, every step_mm). The finger is the slanted strip of the FINGER_* model in
+    the plane normal to the jaw axis. For each:
+    - the column: every section within that strip grown by clear_mm (the planner's clearance to the part, plus its
+      pose uncertainty); the open jaws must clear its extent along the jaw axis, which is the grasp width (at most
+      stroke_mm): the jaws open past it and close on it;
+    - the cover: the height over which the pads themselves (the strip, not grown, its first PAD_LEN_MM) reach that
+      extent on both sides (sections within touch_mm of it), at least min_touch_mm (not an edge or a lip only);
+      the lowest finger point must be min(min_cover_mm,
+      cover_frac x the top of what the pads reach) below that top (plan.unload's MIN_COVER rule, with the column's
+      own top);
+    - scored by the cover (up to 8 mm), the stroke margin (open_mm minus the width, up to 16 mm) and the distance of
+      the contact (where the pads touch, on average) from the mesh centroid: the part hangs from the jaws.
+    The picks are spread over frames (jaw axis, lean, tilt) and over what they grip (width, contact): the planner tries
+    other features and other arm poses early. prior(yaw_deg, lean, tilt_deg) -> weight orders the frames by how well
+    the arm reaches them (default: all alike); the scores returned are the mesh's own.
+    -> [(cx, cy, yaw_deg, lean, tilt_deg, pz, width, z_tip, cover, score)] in that order, at most n_keep: (cx, cy, pz)
+    the pinch point (pad centre) and z_tip the lowest finger point, mm."""
+    v = np.asarray(v, float)
+    h = float(height if height is not None else v[:, 2].max())
+    zs = np.arange(step_mm / 2, h, step_mm)
+    if not len(zs):
+        return []
+    secs = _sections(v, f, zs)
+    cen = mesh_centroid(v, f)[:2]
+    dirs = dirs if dirs is not None else [(float(y), s) for y in range(0, 180, 15) for s in (1, -1)]
+    found = []
+    for yaw, lean in dirs:
+        c, s = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+        rot = np.array([[c, s], [-lean * s, lean * c]])           # part xy -> (u along the jaw, w toward the lean)
+        rs = [seg @ rot.T if len(seg) else seg for seg in secs]
+        allw = np.concatenate([r[:, :, 1].ravel() for r in rs if len(r)] or [np.zeros(0)])
+        if not len(allw):
+            continue
+        w0 = float(allw.min()) - ROW_MM
+        n_rows = int(math.ceil((float(allw.max()) - w0) / ROW_MM)) + 2
+        ext = [_row_extents(r, w0, n_rows) for r in rs]
+        LO, HI = np.array([e[0] for e in ext]), np.array([e[1] for e in ext])      # (layer, row)
+        cu, cw = rot @ cen
+        z_hi = h - min(min_cover_mm, cover_frac * h)            # deepest useful tip: the MIN_COVER rule, whole part
+        tips = np.arange(tip_mm, z_hi + 1e-9, max(step_mm, (z_hi - tip_mm) / 24))
+        for tilt in tilts:
+            a = math.radians(tilt)
+            sa, ca = math.sin(a), math.cos(a)
+            for z_tip in tips:
+                z_e = z_tip + FINGER_HALF_MM * sa                  # the finger's end (on its axis): the corner is lowest
+                k0 = int(np.searchsorted(zs, z_tip - clear_mm))
+                k1 = int(np.searchsorted(zs, z_e + FINGER_LEN_MM * ca + (FINGER_HALF_MM + clear_mm) * sa + clear_mm,
+                                         side="right"))
+                col = [(zs[kz], _strip_extents(LO[kz], HI[kz], zs[kz] - z_e, sa, ca, FINGER_HALF_MM + clear_mm,
+                                               clear_mm), _strip_extents(LO[kz], HI[kz], zs[kz] - z_e, sa, ca,
+                                                                         FINGER_HALF_MM, 0.0, PAD_LEN_MM))
+                       for kz in range(k0, k1)]
+                col = [cz for cz in col if cz[1] is not None]
+                if not col:
+                    continue
+                lo_o = np.min([cz[1][0] for cz in col], axis=0)        # opening: the finger grown by the clearance
+                hi_o = np.max([cz[1][1] for cz in col], axis=0)
+                width = hi_o - lo_o
+                ok = np.isfinite(width) & (width <= stroke_mm) & (width > 0.5)
+                pads = [cz for cz in col if cz[2] is not None]
+                if not ok.any() or not pads:
+                    continue
+                zk = np.array([cz[0] for cz in pads])
+                L = np.array([cz[2][0] for cz in pads])               # what the pads themselves reach, per layer
+                H = np.array([cz[2][1] for cz in pads])
+                has = np.isfinite(L)
+                top = np.where(has, zk[:, None], 0.0).max(0)
+                ok &= z_tip <= top - np.minimum(min_cover_mm, cover_frac * top)
+                t_lo, t_hi = has & (L <= lo_o + touch_mm), has & (H >= hi_o - touch_mm)
+                cover = np.minimum(t_lo.sum(0), t_hi.sum(0)) * step_mm   # the pads touch the widest material on both
+                ok &= cover >= min_touch_mm                               # sides, over this much height
+                touch = t_lo | t_hi
+                zc = (touch * zk[:, None]).sum(0) / np.maximum(touch.sum(0), 1)     # mean height of the contact
+                for j in np.flatnonzero(ok):
+                    we = w0 + (j + 0.5) * ROW_MM                   # finger end, across the jaw axis
+                    pw, pz = we - FINGER_END_MM * sa, z_e + FINGER_END_MM * ca       # the pinch
+                    pu = 0.5 * (lo_o[j] + hi_o[j])
+                    wc = we - (zc[j] - z_e) * (sa / ca if ca > 1e-9 else 0.0)        # the contact: on the finger axis
+                    d = math.hypot(pu - cu, wc - cw)
+                    sc = min(cover[j], 8.0) / 8.0 * min(open_mm - width[j], 16.0) / 16.0 / (1.0 + d / 25.0) \
+                        + 1e-3 * min(cover[j], 30.0) / 30.0          # (ties: the deeper cover)
+                    x, y = np.linalg.solve(rot, [pu, pw])
+                    gx, gy = np.linalg.solve(rot, [pu, wc])
+                    found.append(((float(x), float(y), float(yaw), int(lean), int(tilt), float(pz), float(width[j]),
+                                   float(z_tip), float(cover[j]), float(sc)), (float(gx), float(gy))))
+    if not found:
+        return []
+    # spread: each pick is the best score x 0.7 per pick with the same frame x 0.6 per pick gripping the same thing
+    # (width within 4 mm, contact within 10 mm), so that the planner tries other features and other arm poses early
+    sc = np.array([cand[-1] * (prior(*cand[2:5]) if prior else 1.0) for cand, _ in found])
+    frames, groups = {}, {}
+    fid = np.array([frames.setdefault(cand[2:5], len(frames)) for cand, _ in found])
+    gid = np.array([groups.setdefault((round(cand[6] / 4.0), round(gx / 10.0), round(gy / 10.0)), len(groups))
+                    for cand, (gx, gy) in found])
+    nf, ng = np.zeros(len(frames)), np.zeros(len(groups))
+    keep, used = [], np.zeros(len(found), bool)
+    while len(keep) < min(n_keep, len(found)):
+        eff = np.where(used, -1.0, sc * 0.7 ** nf[fid] * 0.6 ** ng[gid])
+        k = int(np.argmax(eff))
+        used[k] = True
+        nf[fid[k]] += 1
+        ng[gid[k]] += 1
+        keep.append(found[k][0])
+    return keep
+
+
 def simplify(vertices: np.ndarray, faces: np.ndarray, max_faces: int = 150_000, cell_mm: float = 0.1):
     """Vertex-clustering decimation (for a visual mesh: MuJoCo reads at most 200k STL faces): merge vertices on a
     grid, doubling the cell until at most max_faces non-degenerate triangles are left. -> (vertices, faces)."""

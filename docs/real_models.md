@@ -34,7 +34,10 @@ models (STL / 3MF) -> BambuStudio CLI: arrange on one P1S plate, slice  (real/ba
    - the **grasp cross-section**: where the jaws close at the grasp heights (60 % of the height and 4 mm below the
      top), from the mesh's sections at those heights. These are exactly the slicer's layers there. From the footprint
      centre, the outline in a 12 mm band along each axis gives the span the jaws must open to and its midpoint, the
-     grasp centre: an enclosure gives its outer walls, an L bracket its upright.
+     grasp centre: an enclosure gives its outer walls, an L bracket its upright;
+   - the **layer grasps**: grasps searched over the part's own layers (jaw axis, approach tilt, finger position, tip
+     height), tried only when the grasp above finds none. See [Grasp search over the part's own
+     layers](#grasp-search-over-the-parts-own-layers).
 
    The body in physics is the mesh: convex pieces for contacts and the true mesh for the cameras. The pieces come
    from a grid split of the surface (up to 3 x 3 cells, about one per 25 mm), with one convex hull per cell. The mesh
@@ -42,9 +45,10 @@ models (STL / 3MF) -> BambuStudio CLI: arrange on one P1S plate, slice  (real/ba
    spawned at the mesh's pose plus N(0, 1.5 mm) per axis and N(0, 2 deg) in yaw, the same spawn noise as
    `scripts/eval_unload.py`, so the slicer prior is not exact and the camera has something to correct.
 4. **Unload.** `scripts/eval_real_models.py` runs the existing `plan.unload.unload_parts` on printer 5 (row A of the
-   default two-row cell), with ideal sensors. Routing follows the catalogue rules: a part longer than 80 mm goes to
-   the large-part tray, a smaller one to a tote, and a part wider than the 70 mm jaw stroke on both sides is never
-   attempted (route `reject`). Anything left goes to the rake fallback.
+   default two-row cell), with ideal sensors. The grasp planner tries its own grasp first and the layer grasps when it
+   finds none (`--no-layer-grasp`: its own grasp only, as before the search). Routing follows the catalogue rules: a
+   part longer than 80 mm goes to the large-part tray, a smaller one to a tote, and a part wider than the 70 mm jaw
+   stroke on both sides is never attempted (route `reject`). Anything left goes to the rake fallback.
 
 Two plate layouts, from the same oriented models:
 
@@ -53,6 +57,62 @@ Two plate layouts, from the same oriented models:
 - **Robot-friendly**: `sim.real_parts.pack_meshes` packs the same models with the cell's packer (`jobs/plates.py`
   MaxRects): 25 mm between parts for the jaws (`PART_SPACING_MM`), the front 30 mm of the bed left free. The plate is
   then sliced as placed (`--arrange 0`). This is the farm's design-for-automation rule applied to real models.
+
+## Grasp search over the part's own layers
+
+`plan.unload.plan_grasp` closes the jaws across the footprint's narrow side, or across the grasp cross-section of a
+real part, at two fixed heights, and searches the approach tilt, the carriage position and the IK seed. On real
+parts it found a grasp for 1 of 22 private parts. Probing the planning model (IK over the bed, door open) shows why
+fixed heights and the footprint's axes miss so much:
+
+- **The arm reaches the bed only tilted.** Through the door, no approach 0 to 35 deg from vertical has an IK solution
+  anywhere on the bed. 50 and 65 deg, leaning into the printer, work almost everywhere, and 80 deg in places.
+- **Jaws pointing into the printer are out of reach.** A jaw axis more than about 60 deg from the door plane reaches
+  the bed from one or two carriage positions at most, and there the arm meets the door frame. A part whose narrow
+  side points into the printer has to be gripped across its long side.
+- **A tilted finger is wide in every layer.** At 65 deg the finger, 14 mm across, cuts each horizontal layer over
+  14 / cos 65 deg = 33 mm. The jaws must clear everything in that strip, so a jaw axis turned away from a part's
+  edge sees the edge run along the jaw over the whole strip.
+- **The fingertips are about 10 mm below the pinch point** at 50 to 65 deg. A pinch height taken from the part's
+  height puts the tips into the bed, or far above a low part.
+- **Small features at the fixed heights.** The wide outline is often lower than both heights.
+
+The search uses only what the robot has: the G-code's footprint, yaw and height, and the mesh that comes with the job
+in the 3MF, in the plan's frame. It never uses the simulator's truth.
+
+1. **Layers.** The mesh's sections every 0.6 mm (three 0.2 mm slicer layers). These are the outlines the slicer
+   prints (`real.mesh_io.grasp_candidates`, run when the plate is planned; the SKU keeps the result as `grasp_alts`).
+2. **Frames.** Jaw axes every 15 deg in the part's frame, those within 60 deg of the door plane at the part's G-code
+   yaw. The approach leans into the printer, tilted 50, 65 or 80 deg from vertical about the jaw axis. A large part
+   gets 65 deg at most, as for its tray placement (`plan/mesh_grasp.py`: `candidate_dirs`, `TILTS`, `plan_tilts`).
+3. **Finger column.** The finger is a strip in the plane normal to the jaw axis. It ends 10 mm past the pinch point,
+   is 14 mm wide and is checked 60 mm back along the finger (YAM, measured in the planning model). For every finger
+   position across the jaw axis (1 mm steps) and every height of its lowest point (from 1.8 mm, 0.3 mm above
+   `TIP_CLEAR`): the material in that strip, grown by 3 mm of clearance, layer by layer. Its extent along the jaw
+   axis is the width the jaws must open past and close on.
+4. **Kept** if that width fits the 70 mm stroke, the pads (the strip itself, its first 40 mm) touch the widest
+   material on both sides over at least 2 mm of height, and the fingertips reach min(5 mm, 60 % of the column's top)
+   below its top (`MIN_COVER`, with the column's own top).
+5. **Score.** Cover (up to 8 mm) x stroke margin (the 74 mm opening minus the width, up to 16 mm) / (1 + the distance
+   of the contact from the mesh centroid / 25 mm). The part hangs from the jaws. Candidates are ordered by the score
+   times a reach prior (tilt 65 before 50 before 80 deg; jaw axes near the door plane first), spread over frames and
+   over what they grip; 40 per part.
+6. **Planner check** (`plan/mesh_grasp.py`). This runs only when `plan_grasp`'s own grasp fails, and only for SKUs
+   with layer grasps (real meshes). Candidates go in order:
+   - IK at five carriage positions with 2 + 3 seeds;
+   - the pinch slides along the approach (the finger line the candidate was checked on) until the lowest finger point
+     is at the candidate's tip height, within 0.8 mm;
+   - with the jaws open, grasp and pre-grasp must clear the neighbours, the printer and the door by `GRASP_CLEAR`
+     (4 mm, plus pose uncertainty);
+   - the part itself is an obstacle too, with its convex collision pieces at the estimated pose. The jaws clear it by
+     1.5 mm plus its pose pad: the wrist camera centres them on it at the pre-grasp. `plan_grasp` ignores a small
+     part's own body and keeps `GRASP_CLEAR` to a large one;
+   - the fingertips stay `TIP_CLEAR` above the bed.
+
+   The first feasible candidate wins, at its best carriage position. A frame with no IK solution at all is skipped
+   for the candidates near it.
+
+The catalogue's primitive SKUs carry no layer grasps, so their planning does not change (regression check below).
 
 ## Models
 
@@ -159,6 +219,36 @@ sim then takes it away, as an operator would.
 The two generated models (an open enclosure and an L bracket, 35 mm apart, the end-to-end test in
 `tests/test_real_models.py`) are both placed in their totes, with camera errors under 1 mm.
 
+**With the grasp search over the part's own layers** (same plates, seeds and settings; runs
+`runs/real_models/open_*_grasp2`). Before: the tables above. "Layers" is a grasp from the search; its tilt and width
+follow.
+
+| Part (robot-friendly plate) | Grasp before | Grasp after | Outcome before | Outcome after | Ends before / after |
+|---|---|---|---|---|---|
+| `cargo_box` | no | layers, 65 deg, 14 mm | no_grasp | slipped, twice | raked off / raked off |
+| `clamp` | yes (50 deg, 2 mm) | the same | placed | placed | its tote / its tote |
+| `benchy` | yes (50 deg, 21 mm) | the same | dropped_in_transit | dropped_in_transit | its tote / its tote |
+| `calib_10cc` | no | layers, 65 deg, 50 mm | no_grasp | insert_blocked | raked off / reject bin |
+| `lock_bracket` | no | no (camera: missing) | missing | missing | on the bed / on the bed |
+| `switch_case` | no | no (camera: missing) | missing | missing | raked off / on the bed |
+| `door_bracket` | no | no | no_grasp | no_grasp | raked off / reject bin |
+
+- **Grasps 2 -> 4 of 7, placed 2 -> 2.** The two new grasps fail in physics. On the cargo box (a 12 x 11 x 9 mm open
+  box, one convex piece) the jaws close to 6 mm on a planned 14 mm, so the pads meet the box somewhere the finger
+  model did not expect. It slips, and on the retry it has been knocked over. The calibration block's grasp, across
+  its 50 mm length, is found, but the straight insert from the pre-grasp is blocked: next to it stands the switch
+  case on edge, which the camera has lost ("missing"), so it is a blob in the planning scene. In an earlier try with
+  a different candidate order, the cargo box was placed. Single episodes, so a grasp that works once is not yet a
+  rate.
+- **The door bracket** (100 x 66 mm, tray) has candidates, but every one collides with a neighbour or has no IK
+  solution: its narrow side points into the printer, and grasps across the corners need the arm right over the
+  standing switch case.
+- **The slicer's arrange: still 0 of 7.** With 2.4 mm between parts the search finds nothing either. The rejections
+  are IK failures and collisions with the neighbours, for every candidate.
+- **Planning time.** A part without a grasp is searched again before every pick (up to 40 candidates, about 10 s
+  each time). The robot-friendly plate took 791 s of wall time instead of 564 s; the private plates took about as
+  long as before.
+
 ### Unloading: private models (aggregate)
 
 7 private real-world models: 7 project files, 82 objects in all.
@@ -187,9 +277,9 @@ The two generated models (an open enclosure and an L bracket, 35 mm apart, the e
 | Raked off the bed (reject tray, or off the bed) | 4 |
 | Still on the bed after the rake rounds | 17 |
 | Doors opened and closed | 7 of 7 |
-| Plates the robot reported clear while parts were still on them | 3 of 7 (8 parts, 7 of them 2 mm or thinner) |
+| Plates the robot reported clear while parts were still on them | 3 of 7 before the fix (8 parts, 7 of them 2 mm or thinner); 0 of 7 after it |
 
-Why so few grasps:
+Why so few grasps (the first run, before the grasp search):
 
 - **Flat parts.** 12 of the 22 parts are 6 mm tall or less, 9 of them under 4 mm (down to 0.4 mm). The fingertips
   must stay 1.5 mm above the bed (`TIP_CLEAR`) and still reach down 60 % of a thin part's height (`MIN_COVER`), which
@@ -202,15 +292,84 @@ Why so few grasps:
   heights. A search over the part's own layers for the height with the widest section would find it.
 - **Tiny parts**: 3 x 3 x 6 mm.
 
+**With the grasp search over the part's own layers** (same 7 sliced plates, seeds and settings; run
+`runs/real_models/private_packed_grasp2`):
+
+| | Before | After |
+|---|---|---|
+| Grasp found before the first pick | 1 of 22 | 3 of 22 (2 from the layer search) |
+| Placed in its tote or tray slot (truth) | 1 of 22 (1 of the 19 not refused) | 2 of 22 (2 of 19) |
+| Flat parts, under 3.75 mm (9) | no grasp, none placed | the same: no candidates at all |
+| Refused, wider than the stroke on both sides (3, one of them also flat) | not attempted | the same |
+| Large parts, 58 to 64 mm across the narrow side (7, tray) | no grasp | no grasp |
+| The rest, small parts 5.8 to 13 mm tall (4) | 1 grasp, 1 placed | 3 grasps, 2 placed |
+| Pick attempts | 2 (1 placed, 1 found no grasp at pick time) | 3 (1 placed, 1 slipped, 1 placed but reported `not_in_bin`) |
+| Doors opened and closed | 7 of 7 | 7 of 7 |
+| Wall time per plate | 36 to 289 s | 36 to 290 s |
+
+The four small parts, after:
+
+- **A 3.4 x 3.4 x 5.8 mm part:** a layer grasp, 65 deg, 4 mm wide, tips 1.8 mm above the bed. It ends in its tote,
+  but the robot reports `not_in_bin`: the bin check needs a few 3 mm height-map cells to change, and a part this small
+  barely fills one. A missed success, not a false one.
+- **Its twin on the next plate** is not found by the chamber camera ("missing"), so it is never planned.
+- **A 52 x 11 x 13 mm bar** behind two large parts: a layer grasp, 65 deg, 50 mm across its length, the jaw axis
+  15 deg off the bar's axis (across its 11 mm width the jaws would point into the printer). The jaws close on its two
+  11 mm end faces and lose it on the lift: it slipped.
+- **A 40 x 8 x 10 mm bar:** placed with the fixed grasp, as before.
+
+What still fails, and why:
+
+- **Flat parts (9 of 22)**: below about 3.75 mm. Honest misses, for another tool (above).
+- **Large parts lying along the door (7)**: 58 to 64 mm across, with that narrow side pointing into the printer. To
+  close across it, the jaws would point into the printer, and the arm cannot reach the bed that way. Within the jaw
+  axes it does reach (60 deg of the door plane), the 65 deg finger's strip (33 mm per layer, 47 mm with the
+  clearance) makes every chord across the part wider than the stroke, except across corners, where the pads touch
+  only edges. One of them is really a 1.5 mm plate with a 2.5 mm rib under a 14 mm hooked tab. The jaws touch the
+  hook's lip over less than 2 mm, so the cover rule refuses it. Turned 90 deg on the plate (long side into the
+  printer, as the catalogue's large SKUs are packed), they would likely be gripped across their narrow side. That is
+  untested: the private plates were used as sliced.
+- **Refused (2)**: 113 x 89 and 244 x 100 mm.
+- **Weak grasps the physics rejects**: the bar's grasp on its end faces (above). The search scores cover and
+  stroke margin, not how the pads meet a face at an angle.
+
+The bed verdicts of this run predate the local-noise fix below (`noise_grid`): one plate was still reported clear
+with a 6 mm large part on it. The grasp and placement numbers do not depend on the bed check.
+
 The camera is no better than the prior on these plates (2.2 mm against 2.1 mm). The top-band model helps on average
 (2.2 mm against 4.2 mm with a flat top), but the error on these real tops (thin rims, small features) is larger
 than the 0.5 mm on the primitives.
 
-**Safety finding: thin parts pass the bed-empty check.** On 3 of the 7 plates the robot reported the bed clear with
-parts still on it: seven thin parts (four of 0.8 mm, three of 2 mm) and one 6 mm part. The bed check counts a leftover
-only when it is at least 3 mm high (`perceive.verify.LEFTOVER_MIN_H_MM`), so a part thinner than that is invisible to
-it. The next plate would print on top of it. The primitive catalogue has no part under 8 mm, so the primitive
-batches never hit this case.
+**Safety finding, now fixed: the bed-empty check missed flat parts.** In the first run, on 3 of the 7 plates the robot
+reported the bed clear with parts still on it: seven thin parts (four of 0.8 mm, three of 2 mm) and one 6 mm part.
+The next plate would have printed on top of them. There were two causes, both fixed in `perceive/verify.py`:
+
+- **Below the leftover height.** A leftover counts only when it is at least 3 mm high (`LEFTOVER_MIN_H_MM`), so a
+  thinner part was invisible. Now every planned part lower than 5 mm (`THIN_PART_MM`) is also checked at its own
+  slicer footprint (`thin_leftovers`). The 75th-percentile height inside the footprint is compared with the bare bed
+  in a ring around it, so local bed-plane and calibration bias cancel. The part is still there if the footprint
+  stands at least max(0.4 mm, half the part's height) above the ring. Measured on empty beds, the rise is at most
+  0.27 mm with realistic sensors (0.56 mm harsh: under the harsh preset this can call a person in vain).
+- **A large flat part read as bed noise.** The camera's local noise estimate per 48 mm cell was 1.48 x median |z| of
+  the bed-level points. A part lower than 4 mm that fills a whole cell (here a 91 x 62 mm case part, 6 mm walls on a
+  2.4 mm floor) set that estimate to its own floor height, 3.6 mm. That lifted the "raised" threshold to 12.5 mm and
+  hid the part. The estimate is now the smaller of that and the spread around the cell's own median, which stays at
+  the true noise on a flat part.
+
+After both fixes, with the same plates and seeds, the robot reports **0 of 7 plates clear with a part left on them**:
+every plate with a leftover is flagged for a person. Re-runs on the published two-row seeds (5 plates per row,
+realistic sensors) give identical outcomes for every part, the same bed verdicts and the same doors. A part
+thinner than about 0.5 mm, a few layers, cannot be told from the bed by a D435-class camera at this range, so it
+stays a limit.
+
+### The grasp search and the primitives
+
+The search is a fallback for real parts only: `plan_grasp` runs it only when its own grasp fails, and only for SKUs
+with layer grasps, which only real meshes have. To check that the primitives' results do not move,
+`scripts/eval_unload.py --n 5 --realism realistic` ran on printer 4 (row A) and printer 14 (row B), seeds 0 to 4, on
+master and on the branch with the search (one process each, `PYTHONHASHSEED=0`, outputs in `runs/grasp2_regress`).
+All 10 episode records are identical except for wall-clock time: every part's outcome, truth and end (52 of 52
+placed), the bed verdicts, the doors, the simulated time to the millisecond, every carriage move and drop record.
 
 ## What real models broke, and the fixes
 
@@ -229,6 +388,7 @@ batches never hit this case.
 | The slicer's arrange packs parts a few mm apart: a neighbour's points fall inside a part's search window | points inside another object's footprint are no longer taken as this part's top |
 | MuJoCo reads at most 200,000 STL faces (3DBenchy has 225,706) | visual meshes decimated by vertex clustering |
 | Many convex pieces on one bed overflowed MuJoCo's constraint arena | about one piece per 25 mm (at most 3 x 3) and a larger arena when mesh parts are present |
+| Fixed grasp heights and the footprint's axes miss real parts: low wide outlines, jaws that would point into the printer, fingertips 10 mm below the pinch at the only tilts the arm reaches | a grasp search over the part's own layers (jaw axis, tilt, finger position, tip height), a fallback for mesh SKUs only (`plan/mesh_grasp.py`) |
 
 None of the sim-side changes affect the primitive SKUs. A primitive has no top band or grasp cross-section, so its
 paths are unchanged, and on the packer's plates no two parts come within the 9 mm that the neighbour rule needs. The
@@ -249,10 +409,16 @@ existing test suite passes unchanged.
 - **The top band and the grasp section need the mesh.** The real cell gets the mesh with the job, in the same 3MF as
   the G-code. A plain `.gcode` file has neither. The same information is in the G-code's layers (the top layers,
   the layer at the grasp height); that parser is not written.
-- **Fixed grasp heights.** The grasp heights are fractions of the part's height, as for the primitives. A part
-  whose tall features are small gets a grasp on those features or none.
-- **Thin parts.** Nothing under about 4 mm can be grasped by the jaws, and nothing under 3 mm counts as a leftover
-  in the bed check (see the safety finding above).
+- **The grasp search's finger is a model.** A slanted strip, 14 mm wide, 10 mm past the pinch. It
+  is measured in the planning model but not fitted to every finger geom, so where the pads touch can differ: on the
+  cargo box the jaws closed to 6 mm on a planned 14 mm. The score knows cover and stroke margin, not the angle at which
+  a pad meets a face (the bar's end faces) or friction.
+- **No finger inside a part.** Grasps with one finger inside an enclosure (a wall between the jaws) are not searched.
+  The convex collision pieces fill the inside anyway, so in this sim they would fail.
+- **Fixed reach facts.** The tilts (50 / 65 / 80 deg), the jaw-axis limit (60 deg of the door plane) and the reach
+  prior come from IK probes of this cell. Another arm or another door would need them measured again.
+- **Thin parts.** Nothing under about 4 mm can be grasped by the jaws. The bed check now finds flat leftovers down
+  to about 0.8 mm (see the safety finding above), but not much below 0.5 mm.
 - **One printer, one seed per plate.** The numbers are single episodes, not batch statistics.
 
 ## Reproduce
@@ -265,6 +431,9 @@ PYTHONPATH=. python scripts/eval_real_models.py --models runs/real_models/open_a
     --pack --max-plates 3 --name open_packed                        # the same oriented models, robot-friendly plates
 PYTHONPATH=. python scripts/eval_real_models.py --models my/*.3mf --each --pack --max-plates 1 --anonymous \
     --name mine                                                     # your own files, robot-friendly plates
+PYTHONPATH=. python scripts/eval_real_models.py --sliced runs/real_models/open_packed/plate/plate.gcode.3mf \
+    --name open_packed_grasp2                                       # an already sliced plate (the *_grasp2 runs);
+                                                                    # --no-layer-grasp: the fixed grasp only
 python -m pytest tests/test_real_models.py real/tests/test_bambu_gcode.py real/tests/test_mesh_io.py
 ```
 

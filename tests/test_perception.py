@@ -295,3 +295,57 @@ def test_missing_part_detected(world):
     assert not est[victim]["found"]
     assert all(e["found"] for n, e in est.items() if n != victim)
     cam.close()
+
+
+@pytest.mark.parametrize("noise", ["ideal", "realistic"])
+def test_thin_leftovers_footprint_check(world, noise):
+    """A part flatter than LEFTOVER_MIN_H_MM passes leftover_blobs. The footprint check (self-referenced against the
+    bed ring around it) finds a 0.8 mm part at its planned footprint, and raises no false alarm on an empty bed."""
+    w = world
+    xc, _ = C.printer_frame(P)
+    w.reset(rail_x=xc + 0.4)
+    mujoco.mj_forward(w.m, w.d)
+    objs = [{"name": f"t{i}{j}", "center_mm": [x, y], "yaw_deg": 30.0 * i, "height_mm": 0.8, "footprint_mm": (40.0, 25.0)}
+            for i, x in enumerate((60.0, 128.0, 196.0)) for j, y in enumerate((70.0, 128.0, 196.0))]
+    checked = 0
+    for seed in range(3):
+        cam = V.BedCamera(w, P, noise=noise, rng=np.random.default_rng(seed))
+        pts = cam.points_bed_mm()
+        cam.close()
+        meta = getattr(pts, "meta", None)
+        if meta is not None and meta["quality"] == "failed":
+            continue
+        checked += 1
+        assert V.bed_empty(pts) and V.thin_leftovers(pts, objs) == []
+        for o in objs:                       # the part: its footprint 0.8 mm higher than the bed
+            loc = (np.asarray(pts)[:, :2] - o["center_mm"]) @ V._rot2(o["yaw_deg"])
+            on = (np.abs(loc[:, 0]) <= 20.0) & (np.abs(loc[:, 1]) <= 12.5)
+            q = np.asarray(pts).copy() if meta is None else V.BedPoints(np.asarray(pts).copy(), meta)
+            q[on, 2] += 0.8
+            assert V.bed_empty(q), "0.8 mm is below leftover_blobs: the case this check exists for"
+            assert V.thin_leftovers(q, objs) == [o["name"]]
+    assert checked >= 2
+
+
+def test_large_low_part_does_not_read_as_bed_noise(world):
+    """A part lower than 4 mm can fill whole noise-grid cells; its height must not be taken for local bed noise
+    (which would raise the 'raised' threshold above the part and hide it)."""
+    w = world
+    xc, _ = C.printer_frame(P)
+    w.reset(rail_x=xc + 0.4)
+    mujoco.mj_forward(w.m, w.d)
+    cam = V.BedCamera(w, P, noise="realistic", rng=np.random.default_rng(3))
+    pts = cam.points_bed_mm()
+    cam.close()
+    assert pts.meta["quality"] != "failed" and V.bed_empty(pts)
+    q = np.asarray(pts).copy()
+    on = (q[:, 0] > 2) & (q[:, 0] < 100) & (q[:, 1] > 100) & (q[:, 1] < 200)      # a 98 x 100 mm part ...
+    q[on, 2] += 2.4                                                               # ... 2.4 mm floor ...
+    rim = on & ((q[:, 0] < 6) | (q[:, 0] > 96) | (q[:, 1] < 104) | (q[:, 1] > 196))
+    q[rim, 2] += 3.5                                                              # ... with 5.9 mm walls
+    meta = dict(pts.meta, noise_grid=V.noise_grid(q))
+    sg = np.asarray(meta["noise_grid"]["sigma"], float)
+    cells = (np.arange(sg.shape[0])[:, None] * 48.0, np.arange(sg.shape[1])[None, :] * 48.0)
+    inside = (cells[0] >= 2) & (cells[0] + 48 <= 100) & (cells[1] >= 100) & (cells[1] + 48 <= 200)
+    assert inside.any() and np.nanmax(np.where(inside, sg, np.nan)) < 1.0, "the part's floor was taken for bed noise"
+    assert not V.bed_empty(V.BedPoints(q, meta))

@@ -149,3 +149,43 @@ def test_bambustudio_slice_and_plan(tmp_path):
     finally:
         for p in rp.parts:
             C.CATALOG.pop(p.sku, None)
+
+
+def test_layer_grasp_search_is_a_fallback_for_mesh_skus_only(monkeypatch):
+    """plan_grasp keeps its own grasp first; only a real part (a SKU with grasp_alts) whose fixed-height grasp fails
+    goes on to the search over its layers. Primitives never do: their planning is unchanged."""
+    import plan.mesh_grasp as MG
+    import plan.unload as U
+    assert not any(k.grasp_alts for k in C.CATALOG.values())         # the catalogue: primitives only
+    calls, found = [], {"fixed": None}
+    monkeypatch.setattr(U, "grasp_search", lambda *a, **k: found["fixed"])
+    monkeypatch.setattr(MG, "mesh_grasp", lambda ik, w, i, body, est, rng, n: calls.append(body) or {"mesh": ()})
+
+    class W:                                                            # just what plan_grasp reads
+        part_sku = {"prim": "block", "real": "t_mesh"}
+        part_body = {"prim": 1, "real": 2}
+
+    C.register_sku(C.SKU("t_mesh", "box", (30.0, 20.0, 10.0), grasp_alts=((0.0,) * 10,), pool=1))
+    est = {"center_mm": [128.0, 100.0], "yaw_deg": 0.0}
+    try:
+        assert U.plan_grasp(None, W(), 4, "prim", est=est) is None and calls == []
+        assert U.plan_grasp(None, W(), 4, "real", est=est) == {"mesh": ()} and calls == ["real"]
+        found["fixed"] = {"fixed": True}                                # its own grasp found: no fallback
+        assert U.plan_grasp(None, W(), 4, "real", est=est) == {"fixed": True} and calls == ["real"]
+        found["fixed"] = None
+        monkeypatch.setattr(MG, "ENABLED", False)
+        assert U.plan_grasp(None, W(), 4, "real", est=est) is None and calls == ["real"]
+    finally:
+        C.CATALOG.pop("t_mesh", None)
+
+
+def test_plate_parts_carry_layer_grasps(plate):
+    """The SKUs of a sliced plate carry the grasps searched over their layers: within the stroke, tips above the bed,
+    jaw axes within JAW_YAW_MAX of the door plane on the bed."""
+    from plan.mesh_grasp import JAW_YAW_MAX
+    for p in plate.parts:
+        k = C.CATALOG[p.sku]
+        assert k.grasp_alts, p.name
+        for cx, cy, yaw, lean, tilt, pz, wd, z_tip, cover, sc in k.grasp_alts:
+            assert 0 < wd <= C.GRIPPER_MAX_MM and z_tip >= 1.5 and cover >= 2.0 and tilt in (50, 65, 80)
+            assert abs((p.obj["yaw_deg"] + yaw + 90.0) % 180.0 - 90.0) <= JAW_YAW_MAX + 1e-6

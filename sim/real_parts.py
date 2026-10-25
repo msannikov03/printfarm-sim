@@ -27,7 +27,9 @@ from scipy.spatial import ConvexHull, QhullError
 
 from farm import catalog as C
 from real.gcode_objects import extract, read_gcode_text
-from real.mesh_io import PartGeometry, grasp_section, hull_points, load_3mf, simplify, surface_samples, write_stl
+from plan.mesh_grasp import PLAN_CLEAR_MM, candidate_dirs, frame_prior, plan_tilts
+from real.mesh_io import (PartGeometry, grasp_candidates, grasp_section, hull_points, load_3mf, simplify,
+                          surface_samples, write_stl)
 
 MAX_HULL_PTS = 48        # vertices per convex collision piece (MuJoCo collides with their hull)
 
@@ -132,11 +134,15 @@ def plate_from_slice(gcode_3mf, printer=4, cache_dir="runs/real_models/meshes", 
         vis = write_stl(cache / f"{plate_id}_{sku}_vis.stl", *simplify(g.vertices, g.faces))   # (MuJoCo: <= 200k faces)
         pieces = convex_pieces(g.vertices, g.faces, grid)
         gs = grasp_section(g.vertices, g.faces, [0.6 * h, max(h - 4.0, 0.5 * h)])
+        alts = grasp_candidates(g.vertices, g.faces, h, dirs=candidate_dirs(o["yaw_deg"]),
+                                tilts=plan_tilts(max(fx, fy) > C.TOTE_PART_MAX_MM), stroke_mm=C.GRIPPER_MAX_MM,
+                                clear_mm=PLAN_CLEAR_MM, prior=frame_prior(o["yaw_deg"]))
         bbox = max(fx, 1.0) * max(fy, 1.0) * max(h, 1.0) / 1000.0
         C.register_sku(C.SKU(sku, "box", (float(fx), float(fy), h), solid_frac=min(1.0, g.volume_cm3 / bbox),
                              vis_mesh=str(vis), col_meshes=tuple(tuple(map(tuple, pc.round(4))) for pc in pieces),
                              top_mm=tuple(round(t, 3) for t in g.top_mm),
-                             grasp_mm=tuple(round(t, 3) for t in gs) if gs else (), pool=1))
+                             grasp_mm=tuple(round(t, 3) for t in gs) if gs else (),
+                             grasp_alts=tuple(tuple(round(t, 3) for t in a) for a in alts), pool=1))
         obj = {"name": f"{plate_id}_{sku}", "order_id": f"{plate_id}_{sku}", "sku": sku,
                "center_mm": [float(v) for v in o["center_mm"]], "yaw_deg": float(o["yaw_deg"]), "height_mm": h,
                "footprint_mm": [float(fx), float(fy)], "polygon_mm": o["polygon_mm"], "source_name": o["name"]}

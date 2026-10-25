@@ -156,8 +156,9 @@ class Params:
     x_open_dx: float = 0.15            # carriage offset to the printer's right for the door pull
     pick_clip: tuple = (0.5, 2.0)      # pick time clipped to [lo, hi] x mean
     handoff_age_s: float = 1800.0      # complete bins wait at most this long before a station run
-    workdays: tuple = (0, 1, 2, 3, 4)  # Mon..Fri
-    shift_h: tuple = (9.0, 18.0)
+    workdays: tuple = (0, 1, 2, 3, 4)  # Mon..Fri: days a shift starts on
+    shift_h: tuple = (9.0, 18.0)       # operator hours from the start of a workday; an end past 24 runs past
+                                       # midnight (9, 26 = a day shift 9-18 and an evening shift 18-02)
     human_response_s: float = 600.0    # robot mode: a person reaches a stuck pick (in shift)
     human_fix_s: float = 120.0
     check_every_s: float = 3600.0      # human baseline
@@ -209,6 +210,7 @@ class Sim:
         self.T["rail_speed_mps"] /= p.robot_slowdown
         self.human = p.policy == "human"
         assert self.human or p.policy in POLICIES, p.policy
+        assert 0.0 <= p.shift_h[0] < p.shift_h[1] <= p.shift_h[0] + 24.0, p.shift_h
         self.H = p.days * DAY
         self.heap, self.seq, self.t = [], 0, 0.0
         self.cool_s = p.cool_tau_s * math.log((p.bed_c - p.ambient_c) / (p.release_c - p.ambient_c))
@@ -257,13 +259,15 @@ class Sim:
         pr.log.append((t, state))
 
     def in_shift(self, t):
+        """Inside an operator shift. A shift belongs to the workday it starts on (it may end after midnight)."""
         day, h = divmod(t / 3600.0, 24.0)
-        return int(day) % 7 in self.p.workdays and self.p.shift_h[0] <= h < self.p.shift_h[1]
+        lo, hi = self.p.shift_h
+        return any((int(day) - k) % 7 in self.p.workdays and lo <= h + 24.0 * k < hi for k in (0, 1))
 
     def next_check(self, t):
         """First operator check (hourly marks inside the shift, workdays) at or after t."""
         lo, hi = (h * 3600.0 for h in self.p.shift_h)
-        for day in range(int(t // DAY), int(t // DAY) + 8):
+        for day in range(int(t // DAY) - 1, int(t // DAY) + 8):          # from yesterday: a shift past midnight
             if day % 7 in self.p.workdays:
                 for m in np.arange(day * DAY + lo, day * DAY + hi, self.p.check_every_s):
                     if m >= t:
@@ -718,42 +722,60 @@ def main():
                     help="order SKU mix: small = farm.catalog.SMALL_SKUS, all = every SKU a plate can print")
     ap.add_argument("--queue-policy", default="package", choices=("package", "fifo"),
                     help="robot plate composition (fleet.queue_policy); fifo = by order, as before bed to box")
+    ap.add_argument("--shift-h", help="operator shift start,end (h) on each workday; an end past 24 runs past "
+                                      "midnight, e.g. 9,26 = 9-18 plus 18-02 (default 9,18)")
+    ap.add_argument("--workdays", help="days a shift starts on, 0 = Monday: a range 0-6 or a list 0,1,2 (default 0-4)")
+    ap.add_argument("--no-long-plates", action="store_true",
+                    help="human baseline: cap plates at the print-time cap instead of sizing them to the next check")
+    ap.add_argument("--policies", help="--compare: comma-separated subset of " + ",".join(COMPARE))
     a = ap.parse_args()
     t0, out = time.time(), Path(a.out)
     skus, excluded = sku_mix(a.skus)
     if excluded:
         print(f"--skus all: left out {', '.join(excluded)} (prints longer than one plate, MAX_PLATE_S)")
+    extra = {}
+    if a.shift_h:
+        extra["shift_h"] = tuple(float(v) for v in a.shift_h.split(","))
+    if a.workdays:
+        lo, _, hi = a.workdays.partition("-")
+        extra["workdays"] = tuple(range(int(lo), int(hi) + 1)) if hi else tuple(int(v) for v in a.workdays.split(","))
+    if a.no_long_plates:
+        extra["human_long_plates"] = False
     if not a.compare:
         kp = simulate(days=a.days, policy=a.policy, seed=a.seed, layout=a.layout, n_printers=a.n_printers,
                       station=a.station, order_scale=a.order_scale, order_skus=skus,
-                      queue_policy=a.queue_policy).write(out)
+                      queue_policy=a.queue_policy, **extra).write(out)
         print(json.dumps(kp, indent=1))
         return
     seeds = list(range(a.seed, a.seed + a.seeds))
+    pols = tuple(a.policies.split(",")) if a.policies else COMPARE
+    assert all(p in COMPARE for p in pols), pols
 
     def batch(pol, scale, tag):
         sims = [simulate(days=a.days, policy=pol, seed=s, order_scale=scale * N_PRINTERS / 10.0, order_skus=skus,
-                         queue_policy=a.queue_policy) for s in seeds]
+                         queue_policy=a.queue_policy, **extra) for s in seeds]
         return summarize([sims[0].write(out / tag)] + [s.kpis() for s in sims[1:]])
 
-    runs = {pol: batch(pol, 1.0, pol) for pol in COMPARE}
-    cap = {pol: batch(pol, a.capacity_scale, f"capacity_{pol}") for pol in ("order_aware", "human")}
-    m = runs["order_aware"]["mean"]
+    runs = {pol: batch(pol, 1.0, pol) for pol in pols}
+    cap = {pol: batch(pol, a.capacity_scale, f"capacity_{pol}") for pol in ("order_aware", "human") if pol in pols}
+    m = runs[pols[0]]["mean"]
     res = {"note": "simulation, assumed parameters (fleet/des.py Params; robot timings: "
                    f"{m['timings_source']}; station times: {m['station_source']}); mean/std over seeds",
            "days": a.days, "seeds": seeds, "capacity_scale": a.capacity_scale, "skus": a.skus,
-           "queue_policy": a.queue_policy,
+           "queue_policy": a.queue_policy, "params_override": {k: list(v) if isinstance(v, tuple) else v
+                                                                for k, v in extra.items()},
            "skus_excluded": list(excluded), "runs": runs, "capacity": cap}
     (out / "kpis_compare.json").write_text(json.dumps(res, indent=1))
     w = max(map(len, TABLE))
     print(f"mean over seeds {seeds}")
-    print(f"{'':{w}} " + " ".join(f"{p:>11}" for p in COMPARE))
+    print(f"{'':{w}} " + " ".join(f"{p:>11}" for p in pols))
     for key in TABLE:
-        vals = [runs[p]["mean"][key] for p in COMPARE]
+        vals = [runs[p]["mean"][key] for p in pols]
         print(f"{key:{w}} " + " ".join(f"{'-' if v is None else v:>11}" for v in vals))
     c = {p: cap[p]["mean"]["printing_h"] for p in cap}
-    print(f"capacity (orders x{a.capacity_scale}): printing_h order_aware {c['order_aware']} vs human {c['human']} "
-          f"-> +{c['order_aware'] - c['human']:.0f} printer-h per {a.days:g} days")
+    if len(c) == 2:
+        print(f"capacity (orders x{a.capacity_scale}): printing_h order_aware {c['order_aware']} vs human "
+              f"{c['human']} -> +{c['order_aware'] - c['human']:.0f} printer-h per {a.days:g} days")
     print(f"done in {time.time() - t0:.1f} s")
 
 

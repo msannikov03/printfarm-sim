@@ -125,3 +125,82 @@ def test_part_sunk_into_the_bed_is_cut_there():
     g = PartGeometry.from_mesh(m, bed_z=0.0)
     assert g.dims_mm[2] == pytest.approx(20.0) and g.vertices[:, 2].min() == pytest.approx(0.0)
     assert g.volume_cm3 == pytest.approx((60 * 40 - 56 * 36) * 20 / 1000)    # the floor was below the bed
+
+
+# ---- grasp search over the part's own layers (real.mesh_io.grasp_candidates)
+
+def _block(x0, x1, y0, y1, z0, z1):
+    """Closed axis-aligned box, outward normals."""
+    v = np.array([(x, y, z) for z in (z0, z1) for y in (y0, y1) for x in (x0, x1)], float)
+    f = [(0, 2, 3), (0, 3, 1), (4, 5, 7), (4, 7, 6), (0, 1, 5), (0, 5, 4), (2, 6, 7), (2, 7, 3), (0, 4, 6), (0, 6, 2),
+         (1, 3, 7), (1, 7, 5)]
+    return v, np.array(f, np.int64)
+
+
+def _union(*blocks):
+    vs, fs, n = [], [], 0
+    for v, f in blocks:
+        vs.append(v)
+        fs.append(f + n)
+        n += len(v)
+    return np.vstack(vs), np.vstack(fs)
+
+
+def test_grasp_search_finds_the_low_wide_outline():
+    """A 60 x 40 x 6 base with a small 8 x 8 boss to 26 mm at one end: the fixed grasp heights (60 % of the height,
+    4 mm under the top) see only the boss; the search over the layers also finds the base, low, across its width."""
+    from real.mesh_io import grasp_candidates
+    v, f = _union(_block(-30, 30, -20, 20, 0, 6), _block(18, 26, -4, 4, 6, 26))
+    h = 26.0
+    assert grasp_section(v, f, [0.6 * h, h - 4])[2:] == pytest.approx((8.0, 8.0))     # the boss only
+    cands = grasp_candidates(v, f, h, clear_mm=3.0)
+    assert cands and all(c[6] <= 70.0 for c in cands)                                 # within the stroke
+    base = [c for c in cands if c[7] < 6.0 - 0.6 * 6.0 + 1e-6 and abs(c[6] - 40.0) < 1.0]
+    assert base, "no grasp on the base"
+    c = base[0]
+    assert abs(math.sin(math.radians(c[2]))) > 0.99                                  # jaws across the 40 mm side
+    assert c[7] >= 1.8 and c[8] >= 1.0                                                # tips above the bed, cover
+    boss = [c for c in cands if abs(c[6] - 8.0) < 1.0]
+    assert boss and min(c[7] for c in boss) >= 6.0 + 3.0 - 1e-6     # the boss: tips clear the base below by clear_mm
+
+
+def test_grasp_search_turns_the_jaws_across_the_side_that_fits():
+    """A 90 x 50 x 20 block: wider than the 70 mm stroke along x, not along y. Every candidate fits the stroke, and
+    the best closes across the 50 mm side."""
+    from real.mesh_io import grasp_candidates
+    v, f = _block(-45, 45, -25, 25, 0, 20)
+    cands = grasp_candidates(v, f, 20.0, clear_mm=3.0)
+    assert cands and all(c[6] <= 70.0 for c in cands)
+    best = cands[0]
+    assert best[6] == pytest.approx(50.0, abs=0.5) and abs(math.sin(math.radians(best[2]))) > 0.99
+    # jaw axes at 45 deg or less from x see more than the stroke (the finger's strip is slanted and wide)
+    assert all(abs(math.sin(math.radians(c[2]))) > 0.7 for c in cands)
+
+
+def test_grasp_search_leaves_flat_parts_alone():
+    """Under about 4.5 mm (tips 1.8 mm above the bed, and 60 % of the height covered) no candidate: a 30 x 30 x 3 sheet
+    stays for another tool. A 6 mm part has some."""
+    from real.mesh_io import grasp_candidates
+    assert grasp_candidates(*_block(-15, 15, -15, 15, 0, 3), 3.0) == []
+    assert grasp_candidates(*_block(-15, 15, -15, 15, 0, 6), 6.0, clear_mm=3.0)
+
+
+def test_grasp_search_closes_on_the_outer_walls_of_an_enclosure():
+    from real.mesh_io import grasp_candidates
+    cup = PartGeometry.from_mesh(cup_mesh())
+    cands = grasp_candidates(cup.vertices, cup.faces, 25.0, clear_mm=3.0)
+    assert cands and {round(c[6]) for c in cands} <= {40, 60} | set(range(41, 71))
+    assert min(c[6] for c in cands) == pytest.approx(40.0, abs=0.5)                   # across the outer walls
+
+
+def test_candidate_dirs_keep_the_jaws_out_of_the_printer_direction():
+    """Jaw axes the arm can reach the bed with: within JAW_YAW_MAX of the door plane, leaning into the printer."""
+    from plan.mesh_grasp import JAW_YAW_MAX, candidate_dirs
+    for part_yaw in (0.0, 30.0, 90.0, -62.3):
+        dirs = candidate_dirs(part_yaw)
+        assert dirs
+        for th, lean in dirs:
+            phi = (part_yaw + th + 90.0) % 180.0 - 90.0
+            assert abs(phi) <= JAW_YAW_MAX
+            normal_y = lean * math.cos(math.radians(part_yaw + th))       # the lean (jaw normal) on the bed, y part
+            assert normal_y > 0

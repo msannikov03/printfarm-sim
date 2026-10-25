@@ -69,6 +69,14 @@ NEAR_M = 0.20                 # depth closer than this is not the bed or a part 
 NEAR_FRAC_MAX = 0.01
 BLUR_BINS_MAX = 10            # outline bins with a blurred step -> smeared lens (noise alone: 0-6)
 UNSEEN_MM2 = 600.0            # bed_empty: an unobserved bed patch larger than this cannot be verified
+THIN_PART_MM = 5.0            # planned parts lower than this are also checked by footprint (thin_leftovers): a
+                              # leftover_blobs component must reach LEFTOVER_MIN_H_MM, so a 2 mm part passes it
+THIN_RISE_FRAC = 0.5          # ... still on the bed: the footprint stands above the bed ring around it by this share
+THIN_RISE_MIN_MM = 0.4        # ... of the planned height, and by at least this much (empty bed, measured: rise p99 /
+                              # max 0.24 / 0.27 mm realistic, 0.53 / 0.56 mm harsh: harsh may call a person in vain)
+THIN_RING_MM = (3.0, 10.0)    # ... bed reference: this far outside the footprint (cancels local plane / calibration bias)
+THIN_PCT = 75                 # ... statistic on both sides (a flat part may fill only part of its footprint rectangle)
+THIN_MIN_PTS = 20
 
 
 class BedPoints(np.ndarray):
@@ -702,8 +710,10 @@ NOISE_CELL_MM = 48.0          # local depth-noise grid (robust MAD of bed-level 
 
 
 def noise_grid(p, cell_mm=NOISE_CELL_MM):
-    """Per-cell robust sigma (mm) of bed-level points (|z| < 4 mm: below any part top) after levelling: 1.4826 * median |z|. A cell is
-    large enough that a part or leftover lump covers well under half of it (MAD stays robust). NaN = too few points."""
+    """Per-cell robust sigma (mm) of bed-level points (|z| < 4 mm: below any part top) after levelling: 1.4826 x the
+    smaller of median |z| and the MAD around the cell's own median. A cell is large enough that a part or leftover lump
+    covers well under half of it, but a large flat part lower than 4 mm can fill a whole cell: then median |z| is its
+    height, not noise (it would hide the part), while the MAD around the median stays small. NaN = too few points."""
     n = int(math.ceil(C.BED_MM[0] / cell_mm))
     m = int(math.ceil(C.BED_MM[1] / cell_mm))
     q = p[np.abs(p[:, 2]) < 4.0]
@@ -711,11 +721,12 @@ def noise_grid(p, cell_mm=NOISE_CELL_MM):
     out = np.full((n, m), np.nan)
     key = ij[:, 0] * m + ij[:, 1]
     order = np.argsort(key, kind="stable")
-    key, z = key[order], np.abs(q[order, 2])
+    key, z = key[order], q[order, 2]
     starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]]) if len(key) else np.array([], int)
     for a, b in zip(starts, np.r_[starts[1:], len(key)]):
         if b - a >= 30:
-            out.flat[key[a]] = 1.4826 * float(np.median(z[a:b]))
+            zc = z[a:b]
+            out.flat[key[a]] = 1.4826 * min(float(np.median(np.abs(zc))), float(np.median(np.abs(zc - np.median(zc)))))
     return {"cell_mm": cell_mm, "sigma": out.tolist()}
 
 
@@ -1022,6 +1033,36 @@ def bed_empty(points, tol_pts=30):
     if meta["near_frac"] >= NEAR_FRAC_MAX and unseen_area_mm2(points) > UNSEEN_MM2:
         return False                               # something at the lens hides part of the bed: not verified
     return len(leftover_blobs(points)) == 0
+
+
+def thin_leftovers(points, objects):
+    """Planned parts too flat for leftover_blobs (0 < height < THIN_PART_MM) that are still on the bed, by name.
+    Self-referenced per part: the THIN_PCT percentile of the heights inside the slicer footprint (shrunk 1 mm) against
+    the same percentile of the bed ring around it (THIN_RING_MM outside, raised points left out); a rise of at least
+    max(THIN_RISE_MIN_MM, THIN_RISE_FRAC x planned height) means the part is still there. A footprint or ring the
+    camera did not see (< THIN_MIN_PTS points) is reported too: it cannot be verified."""
+    P = np.asarray(points)
+    if not len(P):
+        return [o["name"] for o in objects if 0.0 < float(o.get("height_mm") or 0.0) < THIN_PART_MM]
+    raised = raised_mask(points)
+    out = []
+    for o in objects:
+        h = float(o.get("height_mm") or 0.0)
+        if not 0.0 < h < THIN_PART_MM:
+            continue
+        fx, fy = (float(v) for v in o["footprint_mm"])
+        loc = (P[:, :2] - np.asarray(o["center_mm"], float)) @ _rot2(o["yaw_deg"])     # bed -> part frame
+        ax, ay = np.abs(loc[:, 0]), np.abs(loc[:, 1])
+        inside = (ax <= max(fx / 2 - 1.0, fx / 4)) & (ay <= max(fy / 2 - 1.0, fy / 4))
+        d = np.maximum(ax - fx / 2, ay - fy / 2)
+        ring = (d >= THIN_RING_MM[0]) & (d <= THIN_RING_MM[1]) & ~raised
+        if inside.sum() < THIN_MIN_PTS or ring.sum() < THIN_MIN_PTS:
+            out.append(o["name"])
+            continue
+        rise = np.percentile(P[inside, 2], THIN_PCT) - np.percentile(P[ring, 2], THIN_PCT)
+        if rise >= max(THIN_RISE_MIN_MM, THIN_RISE_FRAC * h):
+            out.append(o["name"])
+    return out
 
 
 def cannot_verify(points):

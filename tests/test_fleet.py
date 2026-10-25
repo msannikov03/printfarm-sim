@@ -387,6 +387,37 @@ def test_human_baseline():
     assert robot["lead_time_p90_h"] < k["lead_time_p90_h"]
 
 
+def test_shift_past_midnight():
+    H = 3600.0
+    day = Sim(Params(days=1, policy="human", seed=0))
+    grid = np.arange(0.0, 7 * 24 * H, 0.25 * H)
+    old = [int(t // 86400) % 7 in (0, 1, 2, 3, 4) and 9.0 <= (t / H) % 24 < 18.0 for t in grid]
+    assert [day.in_shift(t) for t in grid] == old                       # the default shift is unchanged
+    two = Sim(Params(days=1, policy="human", seed=0, shift_h=(9.0, 26.0)))   # 9-18 plus 18-02
+    mon, tue, sat = 0.0, 24 * H, 5 * 24 * H
+    assert two.in_shift(mon + 20 * H) and two.in_shift(tue + 1.5 * H) and not two.in_shift(tue + 3 * H)
+    assert two.in_shift(sat + 1 * H) and not two.in_shift(sat + 10 * H)      # Friday's evening shift ends Sat 02:00
+    assert not two.in_shift(mon + 1 * H)                                     # Sunday is no workday
+    assert two.next_check(tue + 0.5 * H) == tue + 1 * H                      # the last check of Monday's shift
+    assert two.next_check(tue + 2.5 * H) == tue + 9 * H
+    assert two.next_check(sat + 3 * H) == 7 * 24 * H + 9 * H                 # weekend: next Monday 09:00
+    seven = Sim(Params(days=1, policy="human", seed=0, shift_h=(9.0, 26.0), workdays=tuple(range(7))))
+    assert seven.in_shift(mon + 1 * H) and seven.next_check(sat + 3 * H) == sat + 9 * H
+    with pytest.raises(AssertionError):
+        Sim(Params(days=1, policy="human", seed=0, shift_h=(9.0, 40.0)))   # longer than a day
+
+
+def test_human_second_shift():
+    base = simulate(days=7, policy="human", seed=0).kpis()
+    sim = simulate(days=7, policy="human", seed=0, shift_h=(9.0, 26.0))
+    k = sim.kpis()
+    check_conservation(sim)
+    for t0, _, _, what in sim.busy:                   # the operator still starts unloading only inside a shift
+        assert what == "pack" or sim.in_shift(t0), t0 / 3600
+    assert k["parts_per_day"] > base["parts_per_day"] and k["printer_util_pct"] > base["printer_util_pct"]
+    assert k["lead_time_p50_h"] < base["lead_time_p50_h"]
+
+
 def test_determinism():
     a, b = simulate(days=2, policy="order_aware", seed=5), simulate(days=2, policy="order_aware", seed=5)
     assert a.kpis() == b.kpis() and a.events == b.events

@@ -12,6 +12,7 @@ height, yaw), the chamber camera's pose error after it has refined the plan, whe
 part ended (placed in its tote or tray slot, raked into the reject tray, left on the bed) with the failure reason.
 """
 import argparse
+import collections
 import json
 import math
 import pathlib
@@ -60,6 +61,7 @@ def episode(rp, out, realism="ideal", printer=4, seed=0, video=False, anon=None,
     from farm import catalog as C
     from farm.world import World
     import plan.door as D
+    import plan.mesh_grasp as MG
     import plan.unload as U
     from plan.door import TUCK, operate_door
     from plan.ik import IK
@@ -134,11 +136,19 @@ def episode(rp, out, realism="ideal", printer=4, seed=0, video=False, anon=None,
         ik.belief = U.scene_belief(w, printer, est, dict(placed), pts)
         ik.sync(w.d)
         for n, r in rows.items():
+            U.REJECT, MG.STATS = collections.Counter(), collections.Counter()      # why candidates fail (reporting)
             g = U.plan_grasp(ik, w, printer, placed[n], rng=np.random.default_rng(30_000 + seed), est=est[n]) \
                 if est[n]["found"] else None
             r["grasp_found"] = g is not None
+            r["grasp_candidates"] = len(C.CATALOG[by_obj[n].sku].grasp_alts)   # from the part's own layers
             if g is not None:
-                r["grasp"] = {"tilt_deg": g["tilt"], "height_mm": round(1000 * g["h"], 1), "width_mm": round(1000 * g["width"], 1)}
+                r["grasp"] = {"tilt_deg": g["tilt"], "height_mm": round(1000 * g["h"], 1), "width_mm": round(1000 * g["width"], 1),
+                              "search": "layers" if "mesh" in g else "fixed"}
+                if "mesh" in g:          # (cx, cy, jaw yaw, lean, tilt, pinch z, width, tip z, cover, score), part frame
+                    r["grasp"].update(jaw_yaw_deg=g["mesh"][2], tip_mm=g["mesh"][7], cover_mm=g["mesh"][8])
+            elif est[n]["found"]:
+                r["grasp_rejects"] = dict((U.REJECT + MG.STATS).most_common(6))
+            U.REJECT = None
         return int(unknown)
 
     res = {"realism": realism, "n_parts": len(rows)}
@@ -181,6 +191,15 @@ def episode(rp, out, realism="ideal", printer=4, seed=0, video=False, anon=None,
         r.update(outcome=outcome, slot=intended, s=round(sec, 1),
                  placed=bool(intended is not None and body in w.in_use and U.part_in_bin(w, body, intended)),
                  end=where(body, intended))
+        if r["end"] == "on_bed":                       # where a leftover lies (SIM truth, reporting only)
+            xc, sd = C.printer_frame(printer)
+            pos, quat = w.part_pose(body)
+            zax = np.array([2 * (quat[1] * quat[3] + quat[0] * quat[2]), 2 * (quat[2] * quat[3] - quat[0] * quat[1]),
+                            1 - 2 * (quat[1] ** 2 + quat[2] ** 2)])
+            r["end_bed_mm"] = [round(1000 * sd * (pos[0] - xc), 1),
+                               round(1000 * (sd * pos[1] - C.AISLE_HALF - C.BED_FRONT_GAP), 1),
+                               round(1000 * (pos[2] - C.BENCH_H - C.BED_ZL), 1)]
+            r["end_tilt_deg"] = round(float(np.degrees(np.arccos(np.clip(zax[2], -1, 1)))), 1)
         if outcome == "placed" and not r["placed"] and body in w.in_use and not U.on_bed(w, printer, body):
             w.park(body)
 
@@ -224,6 +243,12 @@ def _outcome(r):
     return f"{o} ({f})" if f and f != o else o
 
 
+def _grasp(r):
+    if not r.get("grasp_found"):
+        return "no"
+    return "yes (layers)" if r.get("grasp", {}).get("search") == "layers" else "yes"
+
+
 def table(results, title):
     """Markdown tables: the plan vs the mesh, and the unload."""
     L = [f"## {title}", "", "| Part | Footprint (mm) | Route | Plan: centre / long / short / height error (mm) | "
@@ -236,7 +261,7 @@ def table(results, title):
                      f"| {r['route']} | {pl['center_err_mm']:.2f} / {pl['long_err_mm']:+.2f} / {pl['short_err_mm']:+.2f} / "
                      f"{pl['height_err_mm']:+.2f} | {pc.get('center_err_mm', float('nan')):.2f}, "
                      f"{pc.get('yaw_err_deg', float('nan')):+.1f} | {pc.get('center_err_no_top_model_mm', float('nan')):.2f} "
-                     f"| {'yes' if r.get('grasp_found') else 'no'} | {_outcome(r)} | {r.get('end', '-')} |")
+                     f"| {_grasp(r)} | {_outcome(r)} | {r.get('end', '-')} |")
     return "\n".join(L) + "\n"
 
 
@@ -257,6 +282,7 @@ def aggregate(results):
             "camera_center_err_mm_max": float(np.max(f("center_err_mm", "perception"))),
             "camera_center_err_flat_top_mm_mean": float(np.mean(f("center_err_no_top_model_mm", "perception"))),
             "grasp_found": sum(bool(r.get("grasp_found")) for r in ps),
+            "grasp_found_by_layer_search": sum(r.get("grasp", {}).get("search") == "layers" for r in ps),
             "placed": sum(bool(r.get("placed")) for r in ps),
             "placed_of_pickable": f"{sum(bool(r.get('placed')) for r in pick)}/{len(pick)}",
             "outcomes": {o: sum(r.get("outcome") == o for r in ps) for o in sorted({r.get("outcome", "-") for r in ps})},
@@ -280,12 +306,16 @@ def main(argv=None):
     ap.add_argument("--realism", default="ideal", choices=["ideal", "realistic", "harsh"])
     ap.add_argument("--printer", type=int, default=4)
     ap.add_argument("--hull", action="store_true", help="one convex hull per part (default: 3 x 3 convex pieces)")
+    ap.add_argument("--no-layer-grasp", action="store_true", help="without the grasp search over the part's own layers "
+                    "(plan/mesh_grasp.py): the fixed-height grasp only, as before it")
     ap.add_argument("--anonymous", action="store_true", help="no object or file names in the outputs")
     ap.add_argument("--video", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
     from real.bambu import slice_models
     from sim.real_parts import plate_from_slice
+    import plan.mesh_grasp as MG
+    MG.ENABLED = not a.no_layer_grasp
     out = pathlib.Path(a.out or OUT / a.name)
     out.mkdir(parents=True, exist_ok=True)
     plates = [pathlib.Path(p) for p in a.sliced]
@@ -333,7 +363,7 @@ def main(argv=None):
         for r in res["parts"]:
             print(f"  {r['part']:<28} {r['route']:<6} plan c {r['plan']['center_err_mm']:.2f} mm, camera c "
                   f"{r.get('perception', {}).get('center_err_mm', float('nan')):.2f} mm, grasp "
-                  f"{'yes' if r.get('grasp_found') else 'no '} -> {_outcome(r)}, ends {r.get('end', '-')}",
+                  f"{_grasp(r)} -> {_outcome(r)}, ends {r.get('end', '-')}",
                   flush=True)
         print(f"  doors {res.get('door_open', {}).get('ok')}/{res.get('door_close', {}).get('ok')}, "
               f"sim {res['sim_s']} s, wall {res['wall_s']} s{', ERROR' if 'error' in res else ''}", flush=True)

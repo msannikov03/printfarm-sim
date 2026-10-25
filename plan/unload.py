@@ -49,6 +49,7 @@ N_SLOT = 40              # wrist-camera points on the part's top face that confi
 LARGE_TILT = 65          # large parts: steepest approach tilt (deg)
 DROP_LOG = None          # SIM truth, reporting only: a list collects one record per drop into a bin (eval_unload.py)
 HOUSEKEEPING_LOG = None  # SIM truth, reporting only: a list collects where parked-away failed parts lay
+ATTEMPT_LOG = None       # reporting only: a list collects one record per chamber scan, pick attempt and rake call
 EXIT_HEIGHTS = (0.17, 0.11, 0.08)   # straight exit out of the door at this height above the bed (m); a long part held
                                     # with a steep tilt brings the forearm to the door header when lifted high: lower
 
@@ -182,7 +183,8 @@ def _rej(why):
 
 def plan_grasp(ik, w, i, body, rng=None, n_seeds=3, est=None):
     """Search grasp height x orientation x carriage position x IK seed for a collision-free grasp with the fingertips
-    above the bed and a collision-free pre-grasp. Returns the best-scoring candidate or None."""
+    above the bed and a collision-free pre-grasp. Returns the best-scoring candidate or None. A real part (mesh SKU)
+    without such a grasp falls back to the search over its own layers (plan/mesh_grasp.py)."""
     p0, jaw_opts, heights = grasp_spec(w, body, est, i)
     sku = w.part_sku[body]
     part_h = (C.PURGE_TAB_MM[2] if sku == "purge_tab" else C.CATALOG[sku].height) / 1000
@@ -190,8 +192,15 @@ def plan_grasp(ik, w, i, body, rng=None, n_seeds=3, est=None):
     # the open jaws keep PRESHAPE > GRASP_CLEAR from its sides. At most LARGE_TILT: it is put down flat in a tray slot
     # with the same tilt, and steeper jaws reach past the slot walls
     if is_large(w, body):
-        return grasp_search(ik, w, i, p0, jaw_opts, heights, part_h, set(), rng, n_seeds, max_tilt=LARGE_TILT)
-    return grasp_search(ik, w, i, p0, jaw_opts, heights, part_h, {w.part_body[body]}, rng, n_seeds)
+        g = grasp_search(ik, w, i, p0, jaw_opts, heights, part_h, set(), rng, n_seeds, max_tilt=LARGE_TILT)
+    else:
+        g = grasp_search(ik, w, i, p0, jaw_opts, heights, part_h, {w.part_body[body]}, rng, n_seeds)
+    k = C.CATALOG.get(sku)
+    if g is None and k is not None and k.grasp_alts:     # a real part: search its own layers (plan/mesh_grasp.py)
+        from plan import mesh_grasp
+        if mesh_grasp.ENABLED:
+            g = mesh_grasp.mesh_grasp(ik, w, i, body, est, rng, n_seeds)
+    return g
 
 
 def grasp_search(ik, w, i, p0, jaw_opts, heights, part_h, ignore, rng=None, n_seeds=3, max_tilt=90):
@@ -1493,12 +1502,21 @@ def bed_camera(w, i, rng=None):
 def scan(cam):
     """One chamber scan; a failed scan (quality 'failed': no frame, blackout) is retried up to RESCANS times."""
     pts = cam.points_bed_mm()
+    tries = 1
     for _ in range(RESCANS):
         meta = getattr(pts, "meta", None)
         if not meta or meta.get("quality") != "failed":
             break
         pts = cam.points_bed_mm()
+        tries += 1
+    _log_attempt("scan", tries=tries)
     return pts
+
+
+def _log_attempt(kind, **rec):
+    """Reporting only (ATTEMPT_LOG): no effect on any decision."""
+    if ATTEMPT_LOG is not None:
+        ATTEMPT_LOG.append(dict(kind=kind, **rec))
 
 
 EXPLAIN_MM = 6.0         # raised points within a found part's footprint + this margin belong to that part
@@ -1572,7 +1590,7 @@ def unload_parts(ex, ik, i, plate, bodies, slot_for, on_result, rng=None):
     or the failure ('no_grasp', 'insert_blocked', 'slipped', 'stuck_on_finger', 'missing', ...). Ground truth
     (part_in_bin / in_tray / on_bed) is for the caller's reporting only.
     Returns (bed_empty_after, unknown_points_first_scan)."""
-    from perceive.verify import bed_empty, cannot_verify, estimate, plate_objects
+    from perceive.verify import bed_empty, cannot_verify, estimate, plate_objects, thin_leftovers
     w = ex.w
     cam = bed_camera(w, i)
     objs = {o["name"]: o for o in plate_objects(plate)}
@@ -1604,6 +1622,8 @@ def unload_parts(ex, ik, i, plate, bodies, slot_for, on_result, rng=None):
             clears += 1
             for b in ik.belief.raw:
                 ok_r, sec_r = _rake(ex, ik, i, b, rng)
+                _log_attempt("rake", phase="clear", ok=bool(ok_r), s=round(sec_r, 2),
+                             strokes=list(getattr(ik, "last_clear", [])))
                 t_clear += sec_r
                 if ok_r:
                     break
@@ -1617,6 +1637,7 @@ def unload_parts(ex, ik, i, plate, bodies, slot_for, on_result, rng=None):
         body = remaining.pop(name)
         slot = slot_for(name)
         ok, outcome, sec, _ = pick_and_place(ex, ik, i, body, slot, rng, est=est[name])
+        _log_attempt("pick", name=name, outcome=outcome, s=round(sec, 2))
         if ok:
             on_result(name, body, slot, outcome, sec)
             continue
@@ -1647,6 +1668,8 @@ def unload_parts(ex, ik, i, plate, bodies, slot_for, on_result, rng=None):
             done = False
             for b in todo:
                 ok, sec = rake(ex, ik, i, b, rng)
+                _log_attempt("rake", phase="final", ok=bool(ok), s=round(sec, 2),
+                             strokes=list(getattr(ik, "last_clear", [])))
                 t_rake += sec
                 if ok:
                     done = True
@@ -1655,13 +1678,14 @@ def unload_parts(ex, ik, i, plate, bodies, slot_for, on_result, rng=None):
                 break
         _housekeeping(w, i, leftovers)
     mujoco.mj_forward(w.m, w.d)
+    thin = list(objs.values())                   # flat parts (< THIN_PART_MM) are checked at their own footprints
     pts = scan(cam)
-    empty = bed_empty(pts)
+    empty = bed_empty(pts) and not thin_leftovers(pts, thin)
     for _ in range(VERIFY_RESCANS):              # "cannot verify" (occluded / failed scan, no leftover seen): look again
         if empty or not cannot_verify(pts):
             break
         pts = scan(cam)
-        empty = bed_empty(pts)
+        empty = bed_empty(pts) and not thin_leftovers(pts, thin)
     if not ORACLE:                  # what is left on this bed stays in the planning scene (door close, next moves)
         ik.belief = scene_belief(w, i, {}, {}, pts)
     from plan.sweep import in_tray

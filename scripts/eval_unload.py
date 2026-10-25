@@ -83,6 +83,7 @@ def episode(args):
         res["handeye_mm"] = np.round(1000 * ex.wrist.handeye, 2).tolist()      # drawn calibration error (truth)
     U.DROP_LOG = []
     U.HOUSEKEEPING_LOG = []
+    U.ATTEMPT_LOG = []
     name_of = {b: n for n, b in placed.items()}
     slots = {}
     tray = {s: None for s in C.LARGE_SLOTS}      # large-tray slot -> the part the robot put / is putting there
@@ -145,6 +146,8 @@ def episode(args):
                                      "truly_placed": truly, "in_tray": bool(body in w.in_use and in_tray(w, printer, body)),
                                      "blocking": bool(body in w.in_use and on_bed(w, printer, body)),
                                      "end": where_now(body, intended),
+                                     "pick_attempts": sum(a["kind"] == "pick" and a["name"] == name
+                                                          for a in U.ATTEMPT_LOG),
                                      "drops": [dr for dr in U.DROP_LOG if dr.get("body") == body]})
                 U.DROP_LOG[:] = [dr for dr in U.DROP_LOG if dr.get("body") != body]
                 if name in large_slot and truly:         # truth, reporting: how centred the lowered placement is
@@ -174,6 +177,7 @@ def episode(args):
     res["moves"] = list(getattr(w, "transfer_log", []))
     res["blob_drops"] = dict(getattr(ex, "blob_drops", {}) or {})   # blob picks into the reject bin, robot's verdict
     res["parked_off"] = list(U.HOUSEKEEPING_LOG or [])              # truth: failed parts that lay off bed / bins
+    res["attempts"] = list(U.ATTEMPT_LOG or [])                     # every chamber scan, pick attempt and rake call
     res["wall_s"] = time.time() - t_wall
     if getattr(ex, "hw", None) is not None:
         res["actuation"] = {"zero_deg": np.round(np.degrees(ex.hw.zero), 3).tolist(),
@@ -302,6 +306,23 @@ def summarize(results):
             out[f"blob_drop:{k}"] += v              # robot: blob picks confirmed in the reject bin / missed / stuck
         for e in r.get("parked_off") or []:
             out[f"parked_off:{e['where']}"] += 1    # truth: a failed part lay on the deck / floor / in the chamber
+    for r in results:                               # attempts (batches from this version on): scans, picks, rakes
+        if "attempts" not in r:
+            continue
+        att = r["attempts"]
+        picks = [a for a in att if a["kind"] == "pick"]
+        out["pick_attempts"] += len(picks)          # every pick_and_place call, retries included
+        out["pick_retries"] += len(picks) - len({a["name"] for a in picks})
+        out["parts_never_attempted"] += sum(p.get("pick_attempts", 0) == 0 for p in r["parts"])
+        for a in picks:
+            out[f"pick_attempt:{a['outcome']}"] += 1
+        scans = [a for a in att if a["kind"] == "scan"]
+        out["bed_scans"] += len(scans)              # chamber scans (a failed frame retried inside one scan)
+        out["bed_scan_frame_retries"] += sum(a.get("tries", 1) - 1 for a in scans)
+        rakes = [a for a in att if a["kind"] == "rake"]
+        out["rake_calls"] += len(rakes)
+        out["rake_calls_ok"] += sum(bool(a.get("ok")) for a in rakes)
+        out["rake_strokes"] += sum(len(a.get("strokes") or []) for a in rakes)   # pushes, rakes and blob picks
     for r in results:                               # carriage moves: slide pose, times, contacts (reporting)
         mo = r.get("motion") or {}
         out["carriage_moves"] += mo.get("carriage_moves", 0)

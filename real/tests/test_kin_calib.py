@@ -98,6 +98,23 @@ def test_touch_off_dry_run_cli(tmp_path):
     assert (np.linalg.norm(c.bed_to_robot(pts) - truth.bed_to_robot(pts), axis=1) * 1000).max() < 4.0
 
 
+def test_touch_off_held_out_check(tmp_path):
+    """--check: a held-out point is touched after the fit points, left out of the fit, and its error reported."""
+    base = calib_main(["touch", "--dry-run", "-o", str(tmp_path / "a.json")])
+    out = tmp_path / "b.json"
+    c = calib_main(["touch", "--dry-run", "--check", "110,110", "-o", str(out)])
+    assert len(c.points) == 4 and np.allclose(c.T_robot_bed, base.T_robot_bed)   # the fit ignores the check point
+    (chk,) = c.checks
+    assert chk["bed_mm"] == [110.0, 110.0, 0.0] and 0.0 < chk["error_3d_mm"] < 4.0
+    e = np.array(chk["error_mm"])
+    assert chk["error_xy_mm"] == pytest.approx(np.hypot(*e[:2]), abs=2e-3)
+    assert chk["error_3d_mm"] == pytest.approx(np.linalg.norm(e), abs=2e-3)
+    q = np.array(chk["robot_m"])                                   # error = fitted calibration's view of the touch
+    assert np.allclose(c.robot_to_bed(q) - [110, 110, 0], e, atol=2e-3)
+    assert BedCalib.load(out).checks == c.checks                   # stored in the calibration file
+    assert BedCalib.load(tmp_path / "a.json").checks == []
+
+
 def test_touch_off_jog_dry_run_cli(tmp_path):
     out = tmp_path / "calib.json"
     c = calib_main(["touch", "--dry-run", "--jog", "--guess", str(nominal((220, 220)).save(tmp_path / "g.json")),
