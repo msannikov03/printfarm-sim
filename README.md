@@ -246,6 +246,10 @@ the simulated cell as mesh parts; how the robot unloads them is in [docs/real_mo
 Everything in `real/` is tested against mock printers (`real/tests`, no hardware needed):
 `python -m real.run_demo --mock --dry-run --sim-preview` rehearses the whole run.
 
+**First real pick** (lab, 28 Oct 2026): the SO-101 reaches into a Creality printer, takes a printed part off the bed and
+drops it into a bin (2× speed).
+
+![A real SO-101 arm picks a printed part from a Creality printer and drops it into a bin](docs/media/real_pick.gif)
 
 ## Repository map
 
@@ -274,6 +278,12 @@ Everything in `real/` is tested against mock printers (`real/tests`, no hardware
 - Door opening on a real enclosure: measure the catch force and the handle grip on hardware.
 - Bed-plate swap as an alternative to unloading in place, compared in the DES.
 - Force-aware release of stuck parts (flex the plate or scrape) instead of relying on the cooled bed.
+
+## Team
+
+- **Mikhail Sannikov** ([@msannikov03](https://github.com/msannikov03)): process owner
+- **Ilya Mikhalchuk** ([@miilv](https://github.com/miilv)): software
+- **Petr Kovalev**: hardware
 
 ## License and acknowledgements
 
